@@ -1,6 +1,7 @@
 import { readFileSync, readdirSync } from "node:fs";
-import { join, basename } from "node:path";
+import { join, basename, extname } from "node:path";
 import { parse as parseYaml } from "yaml";
+import { parseGraphQL } from "./graphql.js";
 
 export interface ProjectInfo {
   name: string;
@@ -204,17 +205,27 @@ export function loadAllProjects(): Map<string, ProjectInfo> {
   const dir = getExamplesDir();
   let files: string[];
   try {
-    files = readdirSync(dir).filter((f) => f.endsWith(".yaml") || f.endsWith(".yml"));
+    files = readdirSync(dir).filter(
+      (f) => f.endsWith(".yaml") || f.endsWith(".yml") || f.endsWith(".graphql"),
+    );
   } catch {
     return projectCache;
   }
 
   for (const file of files) {
     const raw = readFileSync(join(dir, file), "utf-8");
-    const spec = parseYaml(raw) as Record<string, unknown>;
-    const project = parseSpec(spec);
-    const key = basename(file, file.endsWith(".yaml") ? ".yaml" : ".yml");
-    project.name = key;
+    const ext = extname(file);
+    const key = basename(file, ext);
+    let project: ProjectInfo;
+
+    if (ext === ".graphql") {
+      project = parseGraphQL(raw, key);
+    } else {
+      const spec = parseYaml(raw) as Record<string, unknown>;
+      project = parseSpec(spec);
+      project.name = key;
+    }
+
     projectCache.set(key, project);
   }
 

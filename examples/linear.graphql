@@ -1,0 +1,505 @@
+# ============================================================
+# Linear GraphQL API — Issue CRUD Minimal Schema
+# ============================================================
+#
+# Endpoint:  POST https://api.linear.app/graphql
+#
+# Authentication:
+#   Header: Authorization: <api-key>
+#   - Personal API key: created at Linear Settings > API > Personal API keys
+#   - OAuth token: obtained via OAuth2 flow
+#   Both are passed directly in the Authorization header (no "Bearer " prefix for API keys)
+#
+# Request format:
+#   Content-Type: application/json
+#   Body: { "query": "...", "variables": { ... } }
+#
+# ============================================================
+
+# ------ Scalars ------
+
+"""ISO 8601 date-time string (e.g. "2024-01-15T08:30:00.000Z")"""
+scalar DateTime
+
+"""Date without time (e.g. "2024-01-15")"""
+scalar TimelessDate
+
+"""Arbitrary JSON value"""
+scalar JSON
+
+# ------ Enums ------
+
+enum PaginationOrderBy {
+  createdAt
+  updatedAt
+}
+
+# ------ Query ------
+
+type Query {
+  """Fetch a single issue (id accepts UUID or readable identifier like "ENG-123")"""
+  issue(id: String!): Issue!
+
+  """List issues with pagination"""
+  issues(
+    filter: IssueFilter
+    before: String
+    after: String
+    first: Int = 50
+    last: Int = 50
+    includeArchived: Boolean = false
+    orderBy: PaginationOrderBy = createdAt
+  ): IssueConnection!
+}
+
+# ------ Mutation ------
+
+type Mutation {
+  """Create a new issue"""
+  issueCreate(input: IssueCreateInput!): IssuePayload!
+
+  """Update an existing issue"""
+  issueUpdate(id: String!, input: IssueUpdateInput!): IssuePayload!
+
+  """Delete an issue (moved to trash, permanently deleted after 30 days)"""
+  issueDelete(id: String!, permanentlyDelete: Boolean): IssueArchivePayload!
+
+  """Archive an issue"""
+  issueArchive(id: String!, trash: Boolean): IssueArchivePayload!
+
+  """Unarchive an issue"""
+  issueUnarchive(id: String!): IssueArchivePayload!
+
+  """Batch update issues (max 50)"""
+  issueBatchUpdate(ids: [String!]!, input: IssueUpdateInput!): IssueBatchPayload!
+}
+
+# ------ Input Types ------
+
+input IssueCreateInput {
+  """Custom UUID; auto-generated if omitted"""
+  id: String
+
+  """Issue title"""
+  title: String
+
+  """Description in markdown"""
+  description: String
+
+  """Team ID (the only required field)"""
+  teamId: String!
+
+  """Assignee user ID"""
+  assigneeId: String
+
+  """Workflow state ID"""
+  stateId: String
+
+  """Priority: 0=None, 1=Urgent, 2=High, 3=Medium, 4=Low"""
+  priority: Int
+
+  """Complexity estimate"""
+  estimate: Int
+
+  """Label IDs"""
+  labelIds: [String!]
+
+  """Parent issue ID (accepts UUID or "ENG-123" format)"""
+  parentId: String
+
+  """Project ID"""
+  projectId: String
+
+  """Cycle ID"""
+  cycleId: String
+
+  """Project milestone ID"""
+  projectMilestoneId: String
+
+  """Due date"""
+  dueDate: TimelessDate
+
+  """Subscriber user IDs"""
+  subscriberIds: [String!]
+
+  """Sort order"""
+  sortOrder: Float
+
+  """Use team's default template"""
+  useDefaultTemplate: Boolean
+}
+
+input IssueUpdateInput {
+  """Issue title"""
+  title: String
+
+  """Description in markdown"""
+  description: String
+
+  """Assignee user ID"""
+  assigneeId: String
+
+  """Workflow state ID"""
+  stateId: String
+
+  """Priority: 0=None, 1=Urgent, 2=High, 3=Medium, 4=Low"""
+  priority: Int
+
+  """Complexity estimate"""
+  estimate: Int
+
+  """Label IDs (full replacement)"""
+  labelIds: [String!]
+
+  """Label IDs to add incrementally"""
+  addedLabelIds: [String!]
+
+  """Label IDs to remove incrementally"""
+  removedLabelIds: [String!]
+
+  """Move to another team"""
+  teamId: String
+
+  """Parent issue ID"""
+  parentId: String
+
+  """Project ID"""
+  projectId: String
+
+  """Cycle ID"""
+  cycleId: String
+
+  """Project milestone ID"""
+  projectMilestoneId: String
+
+  """Due date"""
+  dueDate: TimelessDate
+
+  """Whether to trash the issue"""
+  trashed: Boolean
+
+  """Sort order"""
+  sortOrder: Float
+
+  """Subscriber user IDs"""
+  subscriberIds: [String!]
+
+  """Snooze until this time"""
+  snoozedUntilAt: DateTime
+}
+
+"""Issue filter (all fields optional, combinable)"""
+input IssueFilter {
+  """Filter by identifier (supports eq/neq/in/nin)"""
+  id: IDComparator
+
+  """Filter by title (supports contains/eq/startsWith etc.)"""
+  title: StringComparator
+
+  """Filter by priority"""
+  priority: NumberComparator
+
+  """Filter by creation time"""
+  createdAt: DateComparator
+
+  """Filter by update time"""
+  updatedAt: DateComparator
+
+  """Filter by assignee"""
+  assignee: NullableUserFilter
+
+  """Filter by team"""
+  team: TeamFilter
+
+  """Filter by workflow state"""
+  state: WorkflowStateFilter
+
+  """Filter by labels"""
+  labels: IssueLabelCollectionFilter
+
+  """Filter by project"""
+  project: NullableProjectFilter
+
+  """AND combination"""
+  and: [IssueFilter!]
+
+  """OR combination"""
+  or: [IssueFilter!]
+}
+
+input IDComparator {
+  eq: ID
+  neq: ID
+  in: [ID!]
+  nin: [ID!]
+}
+
+input StringComparator {
+  eq: String
+  neq: String
+  in: [String!]
+  nin: [String!]
+  contains: String
+  containsIgnoreCase: String
+  notContains: String
+  startsWith: String
+  endsWith: String
+}
+
+input NumberComparator {
+  eq: Float
+  neq: Float
+  lt: Float
+  lte: Float
+  gt: Float
+  gte: Float
+  in: [Float!]
+  nin: [Float!]
+}
+
+input DateComparator {
+  eq: DateTime
+  neq: DateTime
+  lt: DateTime
+  lte: DateTime
+  gt: DateTime
+  gte: DateTime
+}
+
+input NullableUserFilter {
+  id: IDComparator
+  name: StringComparator
+  null: Boolean
+}
+
+input TeamFilter {
+  id: IDComparator
+  name: StringComparator
+  key: StringComparator
+}
+
+input WorkflowStateFilter {
+  id: IDComparator
+  name: StringComparator
+  """State type: triage / backlog / unstarted / started / completed / canceled"""
+  type: StringComparator
+}
+
+input IssueLabelCollectionFilter {
+  id: IDComparator
+  name: StringComparator
+}
+
+input NullableProjectFilter {
+  id: IDComparator
+  name: StringComparator
+  null: Boolean
+}
+
+# ------ Object Types ------
+
+type Issue {
+  id: ID!
+  createdAt: DateTime!
+  updatedAt: DateTime!
+  archivedAt: DateTime
+
+  """Issue number (unique within team)"""
+  number: Float!
+
+  """Human-readable identifier, e.g. "ENG-123" """
+  identifier: String!
+
+  title: String!
+
+  """Description in markdown"""
+  description: String
+
+  """Priority: 0=None, 1=Urgent, 2=High, 3=Medium, 4=Low"""
+  priority: Float!
+  priorityLabel: String!
+
+  """Complexity estimate"""
+  estimate: Float
+
+  """Issue URL on Linear"""
+  url: String!
+
+  """Suggested git branch name"""
+  branchName: String!
+
+  dueDate: TimelessDate
+  trashed: Boolean
+  startedAt: DateTime
+  completedAt: DateTime
+  canceledAt: DateTime
+
+  """Associated label IDs"""
+  labelIds: [String!]!
+
+  # --- Relations ---
+
+  """Team this issue belongs to"""
+  team: Team!
+
+  """Current workflow state"""
+  state: WorkflowState!
+
+  """Assignee"""
+  assignee: User
+
+  """Creator"""
+  creator: User
+
+  """Parent issue"""
+  parent: Issue
+
+  """Project this issue belongs to"""
+  project: Project
+
+  """Child issues"""
+  children(
+    before: String
+    after: String
+    first: Int
+    last: Int
+  ): IssueConnection!
+
+  """Labels"""
+  labels(
+    before: String
+    after: String
+    first: Int
+    last: Int
+  ): IssueLabelConnection!
+
+  """Comments"""
+  comments(
+    before: String
+    after: String
+    first: Int
+    last: Int
+  ): CommentConnection!
+}
+
+type Team {
+  id: ID!
+  name: String!
+
+  """Unique team key, used in URLs and issue identifier prefix"""
+  key: String!
+
+  description: String
+  private: Boolean!
+}
+
+type User {
+  id: ID!
+  name: String!
+  displayName: String!
+  email: String!
+  avatarUrl: String
+  active: Boolean!
+
+  """Whether this is the currently authenticated user"""
+  isMe: Boolean!
+}
+
+type WorkflowState {
+  id: ID!
+  name: String!
+
+  """UI color (HEX)"""
+  color: String!
+
+  description: String
+
+  """Position order"""
+  position: Float!
+
+  """State type: triage / backlog / unstarted / started / completed / canceled / duplicate"""
+  type: String!
+
+  team: Team!
+}
+
+type IssueLabel {
+  id: ID!
+  name: String!
+  description: String
+  color: String!
+
+  """Whether this is a group label"""
+  isGroup: Boolean!
+
+  parent: IssueLabel
+  team: Team
+}
+
+type Project {
+  id: ID!
+  name: String!
+  description: String
+  state: String!
+  url: String!
+}
+
+type Comment {
+  id: ID!
+  body: String!
+  createdAt: DateTime!
+  updatedAt: DateTime!
+  user: User
+}
+
+# ------ Payload Types ------
+
+type IssuePayload {
+  """Whether the operation succeeded"""
+  success: Boolean!
+
+  """The created or updated issue"""
+  issue: Issue
+}
+
+type IssueArchivePayload {
+  success: Boolean!
+
+  """The archived/unarchived issue (null when deleted)"""
+  entity: Issue
+}
+
+type IssueBatchPayload {
+  success: Boolean!
+  issues: [Issue!]!
+}
+
+# ------ Pagination Types ------
+
+type IssueConnection {
+  nodes: [Issue!]!
+  edges: [IssueEdge!]!
+  pageInfo: PageInfo!
+}
+
+type IssueEdge {
+  node: Issue!
+  cursor: String!
+}
+
+type IssueLabelConnection {
+  nodes: [IssueLabel!]!
+  pageInfo: PageInfo!
+}
+
+type CommentConnection {
+  nodes: [Comment!]!
+  pageInfo: PageInfo!
+}
+
+type PageInfo {
+  hasNextPage: Boolean!
+  hasPreviousPage: Boolean!
+  startCursor: String
+  endCursor: String
+}
