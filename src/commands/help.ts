@@ -2,13 +2,19 @@ import { Command } from "commander";
 import { getProject, getResource, getAction } from "../loader/index.js";
 import { getFormatter, type Format } from "../formatter/index.js";
 
-export const getCommand = new Command("get")
+export const helpCommand = new Command("help")
   .description("Get project/resource/action details (progressive discovery)")
-  .argument("<project>", "Project name")
+  .argument("[project]", "Project name")
   .argument("[resource]", "Resource name")
   .argument("[action]", "Action name")
-  .action((projectName: string, resourceName?: string, actionName?: string, _opts?: unknown, cmd?: Command) => {
-    const format = (cmd ?? getCommand).optsWithGlobals().format as Format;
+  .action((projectName?: string, resourceName?: string, actionName?: string, _opts?: unknown, cmd?: Command) => {
+    // No arguments: show top-level help (equivalent to postagent -h)
+    if (!projectName) {
+      cmd?.parent?.help();
+      return;
+    }
+
+    const format = (cmd ?? helpCommand).optsWithGlobals().format as Format;
     const formatter = getFormatter(format);
 
     const project = getProject(projectName);

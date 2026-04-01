@@ -1,7 +1,9 @@
 import { createRequire } from "node:module";
 import { Command } from "commander";
 import { searchCommand } from "./commands/search.js";
-import { getCommand } from "./commands/get.js";
+import { helpCommand } from "./commands/help.js";
+import { authCommand } from "./commands/auth.js";
+import { requestCommand } from "./commands/request.js";
 
 const require = createRequire(import.meta.url);
 const { version } = require("../package.json") as { version: string };
@@ -15,6 +17,8 @@ program
   .option("--format <type>", "Output format: markdown / json", "markdown");
 
 program.addCommand(searchCommand);
-program.addCommand(getCommand);
+program.addCommand(helpCommand);
+program.addCommand(authCommand);
+program.addCommand(requestCommand);
 
-program.parse();
+await program.parseAsync();
