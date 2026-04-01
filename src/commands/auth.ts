@@ -30,29 +30,38 @@ function readSecret(prompt: string): Promise<string> {
     stdin.resume();
 
     let input = "";
-    const onData = (ch: string) => {
-      if (ch === "\r" || ch === "\n") {
-        stdin.setRawMode(false);
-        stdin.pause();
-        stdin.removeListener("data", onData);
-        process.stdout.write("\n");
-        resolve(input.trim());
-      } else if (ch === "\u0003") {
-        // Ctrl+C
-        stdin.setRawMode(false);
-        stdin.pause();
-        stdin.removeListener("data", onData);
-        process.stdout.write("\n");
-        reject(new Error("Aborted."));
-      } else if (ch === "\u007f" || ch === "\b") {
-        // Backspace
-        if (input.length > 0) {
-          input = input.slice(0, -1);
-          process.stdout.write("\b \b");
+    let stars = 0;
+    const finish = (value: string) => {
+      stdin.setRawMode(false);
+      stdin.pause();
+      stdin.removeListener("data", onData);
+      process.stdout.write("\n");
+      resolve(value);
+    };
+    const abort = () => {
+      stdin.setRawMode(false);
+      stdin.pause();
+      stdin.removeListener("data", onData);
+      process.stdout.write("\n");
+      reject(new Error("Aborted."));
+    };
+    const onData = (data: string) => {
+      for (const ch of data) {
+        if (ch === "\r" || ch === "\n") {
+          return finish(input.trim());
+        } else if (ch === "\u0003") {
+          return abort();
+        } else if (ch === "\u007f" || ch === "\b") {
+          if (input.length > 0 && stars > 0) {
+            input = input.slice(0, -1);
+            stars--;
+            process.stdout.write("\b \b");
+          }
+        } else if (ch.charCodeAt(0) >= 32) {
+          input += ch;
+          stars++;
+          process.stdout.write("*");
         }
-      } else {
-        input += ch;
-        process.stdout.write("*");
       }
     };
     stdin.on("data", onData);
