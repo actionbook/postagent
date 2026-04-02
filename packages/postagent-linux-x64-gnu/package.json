@@ -1,0 +1,17 @@
+{
+  "name": "postagent-linux-x64-gnu",
+  "version": "0.2.0",
+  "description": "Postagent CLI native binary for Linux x64 (glibc)",
+  "os": ["linux"],
+  "cpu": ["x64"],
+  "bin": {
+    "postagent-core": "bin/postagent-core"
+  },
+  "files": ["bin/postagent-core"],
+  "license": "ISC",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/actionbook/postagent.git",
+    "directory": "packages/postagent-linux-x64-gnu"
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "name": "postagent-win32-x64",
+  "version": "0.2.0",
+  "description": "Postagent CLI native binary for Windows x64",
+  "os": ["win32"],
+  "cpu": ["x64"],
+  "bin": {
+    "postagent-core": "bin/postagent-core.exe"
+  },
+  "files": ["bin/postagent-core.exe"],
+  "license": "ISC",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/actionbook/postagent.git",
+    "directory": "packages/postagent-win32-x64"
+  }
+}

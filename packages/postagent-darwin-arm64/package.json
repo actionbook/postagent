@@ -1,0 +1,17 @@
+{
+  "name": "postagent-darwin-arm64",
+  "version": "0.2.0",
+  "description": "Postagent CLI native binary for macOS ARM64",
+  "os": ["darwin"],
+  "cpu": ["arm64"],
+  "bin": {
+    "postagent-core": "bin/postagent-core"
+  },
+  "files": ["bin/postagent-core"],
+  "license": "ISC",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/actionbook/postagent.git",
+    "directory": "packages/postagent-darwin-arm64"
+  }
+}

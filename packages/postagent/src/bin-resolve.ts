@@ -1,45 +1,77 @@
 import path from "node:path";
 import { existsSync } from "node:fs";
+import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 
-const PLATFORM_MAP: Record<string, string> = {
-  "darwin-arm64": "postagent-core-darwin-arm64",
-  "darwin-x64": "postagent-core-darwin-x64",
-  "linux-arm64": "postagent-core-linux-arm64",
-  "linux-x64": "postagent-core-linux-x64",
-  "win32-x64": "postagent-core-win32-x64.exe",
+const PLATFORM_PACKAGES: Record<string, string> = {
+  "darwin-arm64": "postagent-darwin-arm64",
+  "darwin-x64": "postagent-darwin-x64",
+  "linux-x64": "postagent-linux-x64-gnu",
+  "linux-arm64": "postagent-linux-arm64-gnu",
+  "win32-x64": "postagent-win32-x64",
 };
 
-export function resolveBinary(): string {
-  const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const require = createRequire(import.meta.url);
 
-  // Dev mode: use local cargo build output from workspace root target/
+function resolvePackageDir(packageName: string): string | null {
+  try {
+    const packageJsonPath = require.resolve(`${packageName}/package.json`);
+    return path.dirname(packageJsonPath);
+  } catch {
+    // Fallback for workspace or non-hoisted layouts
+    const __dirname = path.dirname(fileURLToPath(import.meta.url));
+    const packageDir = path.join(__dirname, "..", "..", packageName);
+    const packageJsonPath = path.join(packageDir, "package.json");
+    if (existsSync(packageJsonPath)) {
+      return packageDir;
+    }
+    return null;
+  }
+}
+
+export function resolveBinary(): string {
+  // Dev mode: use local cargo build output
   if (process.env.POSTAGENT_DEV) {
-    // From src/ or dist/: go up to packages/postagent, then up to workspace root
-    const workspaceRoot = path.resolve(__dirname, "..", "..", "..");
-    const devBinary = path.join(workspaceRoot, "target", "debug", "postagent-core");
+    const __dirname = path.dirname(fileURLToPath(import.meta.url));
+    const coreDir = path.resolve(__dirname, "..", "..", "postagent-core");
+    const devBinary = path.join(coreDir, "target", "debug", "postagent-core");
     if (existsSync(devBinary)) {
       return devBinary;
     }
-    // Also check the package-local target (non-workspace build)
-    const localBinary = path.join(
-      __dirname,
-      "..",
-      "..",
-      "postagent-core",
-      "target",
-      "debug",
-      "postagent-core",
-    );
-    if (existsSync(localBinary)) {
-      return localBinary;
-    }
   }
 
-  const key = `${process.platform}-${process.arch}`;
-  const name = PLATFORM_MAP[key];
-  if (!name) {
-    throw new Error(`Unsupported platform: ${key}`);
+  // Allow env var override
+  if (process.env.POSTAGENT_BINARY_PATH) {
+    return process.env.POSTAGENT_BINARY_PATH;
   }
-  return path.join(__dirname, "..", "bin", name);
+
+  const platformKey = `${process.platform}-${process.arch}`;
+  const packageName = PLATFORM_PACKAGES[platformKey];
+
+  if (!packageName) {
+    console.error(`Error: Unsupported platform: ${platformKey}`);
+    console.error(`Supported: ${Object.keys(PLATFORM_PACKAGES).join(", ")}`);
+    process.exit(1);
+  }
+
+  const binaryName = process.platform === "win32" ? "postagent-core.exe" : "postagent-core";
+  const packageDir = resolvePackageDir(packageName);
+
+  if (!packageDir) {
+    console.error(`Error: Missing native package for ${platformKey}`);
+    console.error(`Expected package: ${packageName}`);
+    console.error("");
+    console.error("Try reinstalling: npm install postagent");
+    process.exit(1);
+  }
+
+  const binaryPath = path.join(packageDir, "bin", binaryName);
+
+  if (!existsSync(binaryPath)) {
+    console.error(`Error: No binary found in ${packageName}`);
+    console.error(`Expected: ${binaryPath}`);
+    process.exit(1);
+  }
+
+  return binaryPath;
 }

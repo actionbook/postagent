@@ -8,11 +8,12 @@
   },
   "files": [
     "dist",
-    "bin"
+    "scripts"
   ],
   "scripts": {
-    "dev": "tsx src/cli.ts",
+    "dev": "POSTAGENT_DEV=1 tsx src/cli.ts",
     "build": "tsup",
+    "postinstall": "node scripts/postinstall.cjs",
     "typecheck": "tsc --noEmit"
   },
   "repository": {
@@ -27,5 +28,12 @@
     "tsup": "^8.5.1",
     "tsx": "^4.21.0",
     "typescript": "^6.0.2"
+  },
+  "optionalDependencies": {
+    "postagent-darwin-arm64": "workspace:*",
+    "postagent-darwin-x64": "workspace:*",
+    "postagent-linux-x64-gnu": "workspace:*",
+    "postagent-linux-arm64-gnu": "workspace:*",
+    "postagent-win32-x64": "workspace:*"
   }
 }
