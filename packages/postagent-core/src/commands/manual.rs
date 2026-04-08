@@ -189,7 +189,12 @@ fn extract_meta_from_l1(data: &L1Response) -> ProjectMeta {
     // Base URL from description or first group
     let base_url_re = regex::Regex::new(r"`(https?://[^`]+)`").ok();
     let base_url = base_url_re
-        .and_then(|re| re.captures(description).map(|c| c[1].to_string()));
+        .and_then(|re| re.captures(description).map(|c| c[1].to_string()))
+        .or_else(|| {
+            data.groups
+                .iter()
+                .find_map(|group| group.base_url.as_ref().cloned())
+        });
 
     // Auth from authentication struct
     let auth = data.authentication.as_ref().map(|a| {
@@ -334,26 +339,15 @@ fn format_l1(data: &L1Response) -> String {
 
 fn format_l2(data: &L2Response, project: &str) -> String {
     let total = data.actions.len();
-    let display_actions = if total > 20 { &data.actions[..20] } else { &data.actions[..] };
 
     let mut output = String::new();
 
-    if total > 20 {
-        output.push_str(&format!(
-            "  {}/{} — {} actions (showing first 20)\n",
-            project, data.group, total
-        ));
-    } else {
-        output.push_str(&format!(
-            "  {}/{} — {} actions\n",
-            project, data.group, total
-        ));
-    }
+    output.push_str(&format!("  {}/{} — {} actions\n", project, data.group, total));
 
     output.push_str("\n  Actions:\n");
 
     let mut table_rows: Vec<Vec<String>> = Vec::new();
-    for a in display_actions {
+    for a in &data.actions {
         table_rows.push(vec![
             a.name.clone(),
             a.method.clone(),
@@ -365,13 +359,6 @@ fn format_l2(data: &L2Response, project: &str) -> String {
     let aligned = formatter::align_columns(&table_rows, 3);
     for line in &aligned {
         output.push_str(&format!("    {}\n", line));
-    }
-
-    if total > 20 {
-        output.push_str(&format!(
-            "\n  Showing 20 of {}. Use --all to see all actions.\n",
-            total
-        ));
     }
 
     output.push_str(
@@ -661,6 +648,23 @@ mod tests {
     }
 
     #[test]
+    fn format_l1_uses_group_base_url_fallback() {
+        let data = L1Response {
+            name: "notion".into(),
+            description: "Docs at `developers.notion.com`.".into(),
+            authentication: None,
+            groups: vec![L1Group {
+                name: "pages".into(),
+                base_url: Some("https://api.notion.com".into()),
+                actions: vec!["create_page".into()],
+            }],
+        };
+
+        let output = format_l1(&data);
+        assert!(output.contains("Base URL:  https://api.notion.com"));
+    }
+
+    #[test]
     fn format_l2_basic() {
         let data: L2Response = serde_json::from_value(json!({
             "group": "pages",
@@ -680,6 +684,34 @@ mod tests {
         assert!(output.contains("/v1/pages"));
         assert!(output.contains("Create a page"));
         assert!(output.contains("Run postagent manual <project> <group> <action> for full details."));
+    }
+
+    #[test]
+    fn format_l2_shows_all_actions() {
+        let actions: Vec<serde_json::Value> = (0..25)
+            .map(|i| {
+                json!({
+                    "name": format!("action_{}", i),
+                    "method": "GET",
+                    "path": format!("/v1/action_{}", i),
+                    "base_url": "https://api.example.com",
+                    "summary": format!("Action {}", i),
+                })
+            })
+            .collect();
+        let data: L2Response = serde_json::from_value(json!({
+            "group": "pages",
+            "base_url": "https://api.example.com",
+            "actions": actions
+        }))
+        .unwrap();
+
+        let output = format_l2(&data, "example");
+        assert!(output.contains("example/pages — 25 actions"));
+        assert!(output.contains("action_0"));
+        assert!(output.contains("action_24"));
+        assert!(!output.contains("showing first 20"));
+        assert!(!output.contains("Use --all"));
     }
 
     #[test]
