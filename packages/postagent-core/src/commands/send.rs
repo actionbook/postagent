@@ -52,7 +52,16 @@ pub fn run(
         "GET".to_string()
     };
 
-    // 3. Send request
+    // 3. Default User-Agent (user-supplied header takes precedence)
+    let ua_key = "User-Agent";
+    if !merged_headers.keys().any(|k| k.eq_ignore_ascii_case(ua_key)) {
+        merged_headers.insert(
+            ua_key.to_string(),
+            format!("postagent/{}", env!("CARGO_PKG_VERSION")),
+        );
+    }
+
+    // 4. Send request
     let client = Client::builder()
         .timeout(Duration::from_secs(30))
         .build()?;
@@ -87,7 +96,7 @@ pub fn run(
         }
     };
 
-    // 4. Handle response
+    // 5. Handle response
     let status = response.status();
     let status_text = status.canonical_reason().unwrap_or("").to_string();
     let response_body = response.text()?;
