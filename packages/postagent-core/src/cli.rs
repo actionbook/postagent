@@ -11,9 +11,9 @@ pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
 
-    /// Output format: markdown / json
-    #[arg(long, default_value = "markdown", global = true)]
-    pub format: String,
+    /// Output raw JSON instead of formatted text
+    #[arg(long, global = true)]
+    pub json: bool,
 }
 
 #[derive(Subcommand)]
@@ -23,12 +23,12 @@ pub enum Commands {
         /// Search query
         query: String,
     },
-    /// Get project/resource/action details (progressive discovery)
+    /// Get project/group/action details (progressive discovery)
     Manual {
         /// Project name
         project: Option<String>,
-        /// Resource name
-        resource: Option<String>,
+        /// Group name
+        group: Option<String>,
         /// Action name
         action: Option<String>,
     },
@@ -62,14 +62,14 @@ mod tests {
     fn parse_search_command() {
         let cli = Cli::parse_from(["postagent-core", "search", "github"]);
         assert!(matches!(cli.command, Commands::Search { query } if query == "github"));
-        assert_eq!(cli.format, "markdown");
+        assert!(!cli.json);
     }
 
     #[test]
-    fn parse_search_with_json_format() {
-        let cli = Cli::parse_from(["postagent-core", "--format", "json", "search", "test"]);
+    fn parse_search_with_json_flag() {
+        let cli = Cli::parse_from(["postagent-core", "--json", "search", "test"]);
         assert!(matches!(cli.command, Commands::Search { query } if query == "test"));
-        assert_eq!(cli.format, "json");
+        assert!(cli.json);
     }
 
     #[test]
@@ -77,7 +77,7 @@ mod tests {
         let cli = Cli::parse_from(["postagent-core", "manual"]);
         assert!(matches!(
             cli.command,
-            Commands::Manual { project: None, resource: None, action: None }
+            Commands::Manual { project: None, group: None, action: None }
         ));
     }
 
@@ -86,17 +86,17 @@ mod tests {
         let cli = Cli::parse_from(["postagent-core", "manual", "github"]);
         assert!(matches!(
             cli.command,
-            Commands::Manual { project: Some(ref p), resource: None, action: None } if p == "github"
+            Commands::Manual { project: Some(ref p), group: None, action: None } if p == "github"
         ));
     }
 
     #[test]
-    fn parse_manual_project_and_resource() {
+    fn parse_manual_project_and_group() {
         let cli = Cli::parse_from(["postagent-core", "manual", "github", "repos"]);
         assert!(matches!(
             cli.command,
-            Commands::Manual { project: Some(ref p), resource: Some(ref r), action: None }
-                if p == "github" && r == "repos"
+            Commands::Manual { project: Some(ref p), group: Some(ref g), action: None }
+                if p == "github" && g == "repos"
         ));
     }
 
@@ -105,8 +105,8 @@ mod tests {
         let cli = Cli::parse_from(["postagent-core", "manual", "github", "repos", "list"]);
         assert!(matches!(
             cli.command,
-            Commands::Manual { project: Some(ref p), resource: Some(ref r), action: Some(ref a) }
-                if p == "github" && r == "repos" && a == "list"
+            Commands::Manual { project: Some(ref p), group: Some(ref g), action: Some(ref a) }
+                if p == "github" && g == "repos" && a == "list"
         ));
     }
 
@@ -149,14 +149,14 @@ mod tests {
     }
 
     #[test]
-    fn format_flag_is_global() {
-        let cli = Cli::parse_from(["postagent-core", "search", "test", "--format", "json"]);
-        assert_eq!(cli.format, "json");
+    fn json_flag_is_global() {
+        let cli = Cli::parse_from(["postagent-core", "search", "test", "--json"]);
+        assert!(cli.json);
     }
 
     #[test]
-    fn default_format_is_markdown() {
+    fn default_is_not_json() {
         let cli = Cli::parse_from(["postagent-core", "search", "test"]);
-        assert_eq!(cli.format, "markdown");
+        assert!(!cli.json);
     }
 }
