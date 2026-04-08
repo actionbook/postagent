@@ -21,7 +21,7 @@ struct SearchGroup {
 }
 
 #[derive(Deserialize)]
-struct SearchProject {
+struct SearchSite {
     name: String,
     #[allow(dead_code)]
     description: String,
@@ -29,7 +29,7 @@ struct SearchProject {
 }
 
 struct FlatRow {
-    project: String,
+    site: String,
     group: String,
     action: String,
     method: String,
@@ -66,15 +66,15 @@ pub fn run(query: &str, format: &str) -> Result<(), Box<dyn std::error::Error>> 
         return Ok(());
     }
 
-    let projects: Vec<SearchProject> = serde_json::from_str(&body_text)?;
-    let output = format_search_results(&projects, query);
+    let sites: Vec<SearchSite> = serde_json::from_str(&body_text)?;
+    let output = format_search_results(&sites, query);
     println!("{}", output);
     Ok(())
 }
 
-fn score_action(query_words: &[String], project: &str, group: &str, action: &str, summary: &str) -> f64 {
+fn score_action(query_words: &[String], site: &str, group: &str, action: &str, summary: &str) -> f64 {
     let mut score = 0.0;
-    let project_lower = project.to_lowercase();
+    let site_lower = site.to_lowercase();
     let group_lower = group.to_lowercase();
     let action_lower = action.to_lowercase();
     let summary_lower = summary.to_lowercase();
@@ -82,10 +82,10 @@ fn score_action(query_words: &[String], project: &str, group: &str, action: &str
     let action_parts: Vec<&str> = action_lower.split('_').collect();
 
     for word in query_words {
-        // Exact project name match is a strong signal
-        if project_lower == *word {
+        // Exact site name match is a strong signal
+        if site_lower == *word {
             score += 3.0;
-        } else if project_lower.contains(word.as_str()) {
+        } else if site_lower.contains(word.as_str()) {
             score += 1.5;
         }
         // Action name match
@@ -107,7 +107,7 @@ fn score_action(query_words: &[String], project: &str, group: &str, action: &str
     score
 }
 
-fn format_search_results(projects: &[SearchProject], query: &str) -> String {
+fn format_search_results(sites: &[SearchSite], query: &str) -> String {
     let query_words: Vec<String> = query
         .to_lowercase()
         .split_whitespace()
@@ -115,14 +115,14 @@ fn format_search_results(projects: &[SearchProject], query: &str) -> String {
         .map(String::from)
         .collect();
 
-    // Flatten all actions across projects and groups, with scoring
+    // Flatten all actions across sites and groups, with scoring
     let mut rows: Vec<FlatRow> = Vec::new();
-    for p in projects {
+    for p in sites {
         for g in &p.groups {
             for a in &g.actions {
                 let score = score_action(&query_words, &p.name, &g.name, &a.name, &a.summary);
                 rows.push(FlatRow {
-                    project: p.name.clone(),
+                    site: p.name.clone(),
                     group: g.name.clone(),
                     action: a.name.clone(),
                     method: a.method.clone(),
@@ -140,13 +140,13 @@ fn format_search_results(projects: &[SearchProject], query: &str) -> String {
         b.score
             .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.project.cmp(&b.project))
+            .then_with(|| a.site.cmp(&b.site))
             .then_with(|| a.action.cmp(&b.action))
     });
 
-    // Dedup by (project, group, action)
+    // Dedup by (site, group, action)
     let mut seen = HashSet::new();
-    rows.retain(|r| seen.insert((r.project.clone(), r.group.clone(), r.action.clone())));
+    rows.retain(|r| seen.insert((r.site.clone(), r.group.clone(), r.action.clone())));
 
     // Limit to top 20 results
     rows.truncate(20);
@@ -155,18 +155,18 @@ fn format_search_results(projects: &[SearchProject], query: &str) -> String {
         return "No results found.".to_string();
     }
 
-    // Count distinct projects
-    let project_count = rows
+    // Count distinct sites
+    let site_count = rows
         .iter()
-        .map(|r| r.project.as_str())
+        .map(|r| r.site.as_str())
         .collect::<HashSet<_>>()
         .len();
     let result_count = rows.len();
 
-    // Group by project/group, preserving score order
+    // Group by site/group, preserving score order
     let mut groups: Vec<(String, Vec<&FlatRow>)> = Vec::new();
     for r in &rows {
-        let key = format!("{}/{}", r.project, r.group);
+        let key = format!("{}/{}", r.site, r.group);
         if let Some((_k, items)) = groups.iter_mut().find(|(k, _)| k == &key) {
             items.push(r);
         } else {
@@ -192,16 +192,16 @@ fn format_search_results(projects: &[SearchProject], query: &str) -> String {
     }
 
     output.push_str(&format!(
-        "  {} results from {} projects\n",
-        result_count, project_count
+        "  {} results from {} sites\n",
+        result_count, site_count
     ));
 
     // Hint with example using best match (first row)
     output.push('\n');
-    output.push_str("  Run postagent manual <PROJECT> <GROUP> <ACTION> for full details.\n");
+    output.push_str("  Run postagent manual <SITE> <GROUP> <ACTION> for full details.\n");
     output.push_str(&format!(
         "  Example: postagent manual {} {} {}",
-        rows[0].project, rows[0].group, rows[0].action
+        rows[0].site, rows[0].group, rows[0].action
     ));
 
     output
@@ -265,16 +265,16 @@ mod tests {
 
     #[test]
     fn format_search_empty() {
-        let projects: Vec<SearchProject> = vec![];
+        let sites: Vec<SearchSite> = vec![];
         assert_eq!(
-            format_search_results(&projects, "create page"),
+            format_search_results(&sites, "create page"),
             "No results found."
         );
     }
 
     #[test]
     fn format_search_basic() {
-        let projects = vec![SearchProject {
+        let sites = vec![SearchSite {
             name: "notion".into(),
             description: "test".into(),
             groups: vec![
@@ -299,18 +299,18 @@ mod tests {
             ],
         }];
 
-        let output = format_search_results(&projects, "create page notion");
+        let output = format_search_results(&sites, "create page notion");
         assert!(output.contains("notion/pages:"));
         assert!(output.contains("notion/databases:"));
         assert!(output.contains("create_page"));
         assert!(output.contains("create_database"));
-        assert!(output.contains("Run postagent manual <PROJECT> <GROUP> <ACTION> for full details."));
+        assert!(output.contains("Run postagent manual <SITE> <GROUP> <ACTION> for full details."));
     }
 
     #[test]
-    fn format_search_multi_project() {
-        let projects = vec![
-            SearchProject {
+    fn format_search_multi_site() {
+        let sites = vec![
+            SearchSite {
                 name: "notion".into(),
                 description: "".into(),
                 groups: vec![SearchGroup {
@@ -323,7 +323,7 @@ mod tests {
                     }],
                 }],
             },
-            SearchProject {
+            SearchSite {
                 name: "coda".into(),
                 description: "".into(),
                 groups: vec![SearchGroup {
@@ -338,15 +338,15 @@ mod tests {
             },
         ];
 
-        let output = format_search_results(&projects, "create page");
+        let output = format_search_results(&sites, "create page");
         assert!(output.contains("notion/pages:"));
         assert!(output.contains("coda/pages:"));
-        assert!(output.contains("results from 2 projects"));
+        assert!(output.contains("results from 2 sites"));
     }
 
     #[test]
     fn format_search_dedup() {
-        let projects = vec![SearchProject {
+        let sites = vec![SearchSite {
             name: "notion".into(),
             description: "".into(),
             groups: vec![SearchGroup {
@@ -368,14 +368,14 @@ mod tests {
             }],
         }];
 
-        let output = format_search_results(&projects, "create page");
-        assert!(output.contains("1 results from 1 projects"));
+        let output = format_search_results(&sites, "create page");
+        assert!(output.contains("1 results from 1 sites"));
     }
 
     #[test]
     fn format_search_preserves_full_summary() {
         let long_summary = format!("Create a page {}", "with details ".repeat(5));
-        let projects = vec![SearchProject {
+        let sites = vec![SearchSite {
             name: "test".into(),
             description: "".into(),
             groups: vec![SearchGroup {
@@ -389,7 +389,7 @@ mod tests {
             }],
         }];
 
-        let output = format_search_results(&projects, "create");
+        let output = format_search_results(&sites, "create");
         assert!(output.contains(long_summary.trim()));
     }
 

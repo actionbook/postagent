@@ -19,8 +19,8 @@ postagent search "code hosting"
 ### Manual (Progressive Discovery)
 
 ```bash
-postagent manual                       # List all projects
-postagent manual github                # List groups of a project
+postagent manual                       # List all sites
+postagent manual github                # List groups of a site
 postagent manual github repo           # List actions of a group
 postagent manual github repo list      # Get API doc for a specific action
 postagent manual github repo list --format json  # Output as JSON
@@ -37,7 +37,7 @@ postagent send https://api.example.com -H "Authorization: Bearer token"
 ### Auth
 
 ```bash
-postagent auth github                  # Save API key for a project
+postagent auth github                  # Save API key for a site
 ```
 
 ## Configuration

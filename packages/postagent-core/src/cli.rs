@@ -13,8 +13,8 @@ use clap::{Parser, Subcommand};
 
 Commands:
   search <KEYWORD>                      Search actions by keyword
-  manual [PROJECT] [GROUP] [ACTION]     Browse API reference (progressive discovery)
-  auth <PROJECT>                        Save API key for a project
+  manual [SITE] [GROUP] [ACTION]        Browse API reference (progressive discovery)
+  auth <SITE>                           Save API key for a site
   send <URL> [-X METHOD] [-H HEADER]    Send an HTTP request
 
 Options:
@@ -40,7 +40,7 @@ Examples:
         #[arg(long, default_value = "markdown")]
         format: String,
     },
-    /// Get project/group/action details (progressive discovery)
+    /// Get site/group/action details (progressive discovery)
     #[command(after_help = "\
 Examples:
   postagent manual notion                         List groups and actions
@@ -48,8 +48,8 @@ Examples:
   postagent manual notion pages create_page       Full action details
   postagent manual feishu --format json            JSON output")]
     Manual {
-        /// Project name
-        project: Option<String>,
+        /// Site name
+        site: Option<String>,
         /// Group name
         group: Option<String>,
         /// Action name
@@ -58,23 +58,23 @@ Examples:
         #[arg(long, default_value = "markdown")]
         format: String,
     },
-    /// Save API key for a project
+    /// Save API key for a site
     #[command(after_help = "\
 Examples:
   postagent auth github
   postagent auth openai
 
-Saved keys can be referenced in `send` as $POSTAGENT.<PROJECT>.API_KEY
+Saved keys can be referenced in `send` as $POSTAGENT.<SITE>.API_KEY
 For example, after `postagent auth github`, use $POSTAGENT.GITHUB.API_KEY in headers.")]
     Auth {
-        /// Project name
-        project: String,
+        /// Site name
+        site: String,
     },
     /// Send an HTTP request
     #[command(after_help = "\
 Token substitution:
-  Use $POSTAGENT.<PROJECT>.API_KEY in URL, headers, or body to inject saved keys.
-  Save a key first with `postagent auth <PROJECT>`.
+  Use $POSTAGENT.<SITE>.API_KEY in URL, headers, or body to inject saved keys.
+  Save a key first with `postagent auth <SITE>`.
 
 Examples:
   postagent send https://api.example.com/users
@@ -117,25 +117,25 @@ mod tests {
         let cli = Cli::parse_from(["postagent", "manual"]);
         assert!(matches!(
             cli.command,
-            Commands::Manual { project: None, group: None, action: None, .. }
+            Commands::Manual { site: None, group: None, action: None, .. }
         ));
     }
 
     #[test]
-    fn parse_manual_project_only() {
+    fn parse_manual_site_only() {
         let cli = Cli::parse_from(["postagent", "manual", "github"]);
         assert!(matches!(
             cli.command,
-            Commands::Manual { project: Some(ref p), group: None, action: None, .. } if p == "github"
+            Commands::Manual { site: Some(ref p), group: None, action: None, .. } if p == "github"
         ));
     }
 
     #[test]
-    fn parse_manual_project_and_group() {
+    fn parse_manual_site_and_group() {
         let cli = Cli::parse_from(["postagent", "manual", "github", "repos"]);
         assert!(matches!(
             cli.command,
-            Commands::Manual { project: Some(ref p), group: Some(ref g), action: None, .. }
+            Commands::Manual { site: Some(ref p), group: Some(ref g), action: None, .. }
                 if p == "github" && g == "repos"
         ));
     }
@@ -145,7 +145,7 @@ mod tests {
         let cli = Cli::parse_from(["postagent", "manual", "github", "repos", "list"]);
         assert!(matches!(
             cli.command,
-            Commands::Manual { project: Some(ref p), group: Some(ref g), action: Some(ref a), .. }
+            Commands::Manual { site: Some(ref p), group: Some(ref g), action: Some(ref a), .. }
                 if p == "github" && g == "repos" && a == "list"
         ));
     }
@@ -153,7 +153,7 @@ mod tests {
     #[test]
     fn parse_auth_command() {
         let cli = Cli::parse_from(["postagent", "auth", "openai"]);
-        assert!(matches!(cli.command, Commands::Auth { project } if project == "openai"));
+        assert!(matches!(cli.command, Commands::Auth { site } if site == "openai"));
     }
 
     #[test]

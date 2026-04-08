@@ -4,20 +4,20 @@ use std::path::{Path, PathBuf};
 
 const DEFAULT_PROFILE: &str = "default";
 
-fn token_dir_with_base(base: &Path, project: &str) -> PathBuf {
+fn token_dir_with_base(base: &Path, site: &str) -> PathBuf {
     base.join(".postagent")
         .join(DEFAULT_PROFILE)
         .join("default")
-        .join(project.to_lowercase())
+        .join(site.to_lowercase())
 }
 
-pub fn save_token(project: &str, token: &str) -> Result<(), Box<dyn std::error::Error>> {
+pub fn save_token(site: &str, token: &str) -> Result<(), Box<dyn std::error::Error>> {
     let home = dirs::home_dir().expect("Cannot determine home directory");
-    save_token_to(&home, project, token)
+    save_token_to(&home, site, token)
 }
 
-fn save_token_to(base: &Path, project: &str, token: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let dir = token_dir_with_base(base, project);
+fn save_token_to(base: &Path, site: &str, token: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let dir = token_dir_with_base(base, site);
     fs::create_dir_all(&dir)?;
     let file = dir.join("auth");
     fs::write(&file, token)?;
@@ -25,13 +25,13 @@ fn save_token_to(base: &Path, project: &str, token: &str) -> Result<(), Box<dyn 
     Ok(())
 }
 
-pub fn load_token(project: &str) -> Option<String> {
+pub fn load_token(site: &str) -> Option<String> {
     let home = dirs::home_dir().expect("Cannot determine home directory");
-    load_token_from(&home, project)
+    load_token_from(&home, site)
 }
 
-fn load_token_from(base: &Path, project: &str) -> Option<String> {
-    let file = token_dir_with_base(base, project).join("auth");
+fn load_token_from(base: &Path, site: &str) -> Option<String> {
+    let file = token_dir_with_base(base, site).join("auth");
     fs::read_to_string(file).ok().map(|s| s.trim().to_string())
 }
 
@@ -44,11 +44,11 @@ fn resolve_template_variables_with_base(base: &Path, input: &str) -> Result<Stri
     let re = Regex::new(r"\$POSTAGENT\.([A-Za-z0-9_]+)\.API_KEY").unwrap();
     let mut result = input.to_string();
     for cap in re.captures_iter(input) {
-        let project = cap[1].to_lowercase();
-        let token = load_token_from(base, &project).ok_or_else(|| {
+        let site = cap[1].to_lowercase();
+        let token = load_token_from(base, &site).ok_or_else(|| {
             format!(
                 "Auth not found for \"{}\". Run: postagent auth {}",
-                project, project
+                site, site
             )
         })?;
         result = result.replace(&cap[0], &token);
@@ -77,13 +77,13 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let base = tmp.path();
 
-        save_token_to(base, "myproject", "secret-key-123").unwrap();
-        let loaded = load_token_from(base, "myproject");
+        save_token_to(base, "mysite", "secret-key-123").unwrap();
+        let loaded = load_token_from(base, "mysite");
         assert_eq!(loaded, Some("secret-key-123".to_string()));
     }
 
     #[test]
-    fn load_token_nonexistent_project_returns_none() {
+    fn load_token_nonexistent_site_returns_none() {
         let tmp = TempDir::new().unwrap();
         let base = tmp.path();
 
@@ -96,8 +96,8 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let base = tmp.path();
 
-        save_token_to(base, "MyProject", "token-abc").unwrap();
-        let loaded = load_token_from(base, "myproject");
+        save_token_to(base, "MySite", "token-abc").unwrap();
+        let loaded = load_token_from(base, "mysite");
         assert_eq!(loaded, Some("token-abc".to_string()));
     }
 

@@ -14,7 +14,7 @@ npm install -g postagent
 # Search for services by keyword
 postagent search "code hosting"
 
-# List resources of a project
+# List resources of a site
 postagent get github
 
 # List actions of a resource

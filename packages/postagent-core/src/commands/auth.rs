@@ -1,17 +1,17 @@
 use crate::token;
 use std::io::{self, Write};
 
-pub fn run(project: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let api_key = read_secret(&format!("Enter API key for \"{}\": ", project))?;
+pub fn run(site: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let api_key = read_secret(&format!("Enter API key for \"{}\": ", site))?;
 
     if api_key.is_empty() {
         eprintln!("Error: API key cannot be empty.");
         std::process::exit(1);
     }
 
-    match token::save_token(project, &api_key) {
+    match token::save_token(site, &api_key) {
         Ok(()) => {
-            println!("Auth saved for \"{}\".", project.to_lowercase());
+            println!("Auth saved for \"{}\".", site.to_lowercase());
             Ok(())
         }
         Err(e) => {

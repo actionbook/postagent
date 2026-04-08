@@ -9,8 +9,8 @@ pub enum AppError {
     #[error("{0}")]
     ApiError(String),
 
-    #[error("Auth not found for \"{project}\". Run: postagent auth {project}")]
-    AuthNotFound { project: String },
+    #[error("Auth not found for \"{site}\". Run: postagent auth {site}")]
+    AuthNotFound { site: String },
 
     #[error("{0}")]
     Io(#[from] std::io::Error),
@@ -59,7 +59,7 @@ mod tests {
 
     #[test]
     fn auth_not_found_message() {
-        let err = AppError::AuthNotFound { project: "github".to_string() };
+        let err = AppError::AuthNotFound { site: "github".to_string() };
         assert_eq!(
             err.to_string(),
             "Auth not found for \"github\". Run: postagent auth github"

@@ -14,13 +14,13 @@ fn main() {
     let result = match &cli.command {
         Commands::Search { keyword, format } => commands::search::run(keyword, format),
         Commands::Manual {
-            project,
+            site,
             group,
             action,
             format,
         } => {
             let result = commands::manual::run(
-                project.as_deref(),
+                site.as_deref(),
                 group.as_deref(),
                 action.as_deref(),
                 format,
@@ -35,7 +35,7 @@ fn main() {
             }
             result
         }
-        Commands::Auth { project } => commands::auth::run(project),
+        Commands::Auth { site } => commands::auth::run(site),
         Commands::Send {
             url,
             method,

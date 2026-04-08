@@ -84,7 +84,7 @@ struct ResponseInfo {
 
 #[derive(Deserialize)]
 struct L3Response {
-    project: String,
+    site: String,
     group: String,
     action: String,
     method: String,
@@ -99,12 +99,12 @@ struct L3Response {
 }
 
 pub fn run(
-    project: Option<&str>,
+    site: Option<&str>,
     group: Option<&str>,
     action: Option<&str>,
     format: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let project = match project {
+    let site = match site {
         Some(p) => p,
         None => {
             return Err("show_help".into());
@@ -112,7 +112,7 @@ pub fn run(
     };
 
     // Build the API URL
-    let mut params = vec![("project", project.to_string())];
+    let mut params = vec![("site", site.to_string())];
     if let Some(g) = group {
         params.push(("group", g.to_string()));
     }
@@ -162,7 +162,7 @@ pub fn run(
         println!("{}", format_l1(&data));
     } else if action.is_none() {
         let data: L2Response = serde_json::from_str(&body_text)?;
-        println!("{}", format_l2(&data, project));
+        println!("{}", format_l2(&data, site));
     } else {
         let data: L3Response = serde_json::from_str(&body_text)?;
         println!("{}", format_l3(&data));
@@ -171,9 +171,9 @@ pub fn run(
     Ok(())
 }
 
-// === L1: Project Overview ===
+// === L1: Site Overview ===
 
-struct ProjectMeta {
+struct SiteMeta {
     base_url: Option<String>,
     auth: Option<String>,
     header: Option<String>,
@@ -182,7 +182,7 @@ struct ProjectMeta {
     api_type: Option<String>,
 }
 
-fn extract_meta_from_l1(data: &L1Response) -> ProjectMeta {
+fn extract_meta_from_l1(data: &L1Response) -> SiteMeta {
     let description = &data.description;
     let is_graphql = description.to_lowercase().contains("graphql");
 
@@ -231,7 +231,7 @@ fn extract_meta_from_l1(data: &L1Response) -> ProjectMeta {
             format!("{}: <{}>", a.name, a.description)
         });
 
-        ProjectMeta {
+        SiteMeta {
             base_url: None,
             auth: gql_auth.or(auth),
             header: None,
@@ -240,7 +240,7 @@ fn extract_meta_from_l1(data: &L1Response) -> ProjectMeta {
             api_type: Some("GraphQL".into()),
         }
     } else {
-        ProjectMeta {
+        SiteMeta {
             base_url,
             auth,
             header,
@@ -321,7 +321,7 @@ fn format_l1(data: &L1Response) -> String {
     ));
 
     output.push_str(
-        "\n  Run postagent manual <project> <group> <action> for full details.\n",
+        "\n  Run postagent manual <site> <group> <action> for full details.\n",
     );
     if let Some(first_group) = data.groups.first() {
         if let Some(first_action) = first_group.actions.first() {
@@ -337,12 +337,12 @@ fn format_l1(data: &L1Response) -> String {
 
 // === L2: Group Actions ===
 
-fn format_l2(data: &L2Response, project: &str) -> String {
+fn format_l2(data: &L2Response, site: &str) -> String {
     let total = data.actions.len();
 
     let mut output = String::new();
 
-    output.push_str(&format!("  {}/{} — {} actions\n", project, data.group, total));
+    output.push_str(&format!("  {}/{} — {} actions\n", site, data.group, total));
 
     output.push_str("\n  Actions:\n");
 
@@ -362,7 +362,7 @@ fn format_l2(data: &L2Response, project: &str) -> String {
     }
 
     output.push_str(
-        "\n  Run postagent manual <project> <group> <action> for full details.",
+        "\n  Run postagent manual <site> <group> <action> for full details.",
     );
 
     output
@@ -447,7 +447,7 @@ fn format_l3(data: &L3Response) -> String {
     output.push_str(&format!("  === {}\n\n", data.action));
 
     // Metadata block
-    output.push_str(&format!("  project:   {}\n", data.project));
+    output.push_str(&format!("  site:      {}\n", data.site));
     if is_graphql {
         output.push_str(&format!("  type:      {}\n", data.method));
         output.push_str(&format!("  field:     {}\n", data.path));
@@ -571,7 +571,7 @@ mod tests {
     }
 
     #[test]
-    fn run_without_project_returns_show_help() {
+    fn run_without_site_returns_show_help() {
         let result = run(None, None, None, "markdown");
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().to_string(), "show_help");
@@ -684,7 +684,7 @@ mod tests {
         assert!(output.contains("POST"));
         assert!(output.contains("/v1/pages"));
         assert!(output.contains("Create a page"));
-        assert!(output.contains("Run postagent manual <project> <group> <action> for full details."));
+        assert!(output.contains("Run postagent manual <site> <group> <action> for full details."));
     }
 
     #[test]
@@ -718,7 +718,7 @@ mod tests {
     #[test]
     fn format_l3_restful() {
         let data: L3Response = serde_json::from_value(json!({
-            "project": "notion",
+            "site": "notion",
             "group": "pages",
             "action": "create_page",
             "method": "POST",
@@ -752,7 +752,7 @@ mod tests {
 
         let output = format_l3(&data);
         assert!(output.contains("=== create_page"));
-        assert!(output.contains("project:   notion"));
+        assert!(output.contains("site:      notion"));
         assert!(output.contains("method:    POST"));
         assert!(output.contains("path:      /v1/pages"));
         assert!(output.contains("base_url:  https://api.notion.com"));
@@ -770,7 +770,7 @@ mod tests {
     #[test]
     fn format_l3_graphql() {
         let data: L3Response = serde_json::from_value(json!({
-            "project": "shopify",
+            "site": "shopify",
             "group": "queries",
             "action": "customer",
             "method": "QUERY",
@@ -793,7 +793,7 @@ mod tests {
 
         let output = format_l3(&data);
         assert!(output.contains("=== customer"));
-        assert!(output.contains("project:   shopify"));
+        assert!(output.contains("site:      shopify"));
         assert!(output.contains("type:      QUERY"));
         assert!(output.contains("field:     customer"));
         assert!(output.contains("## Arguments"));
@@ -805,7 +805,7 @@ mod tests {
     #[test]
     fn format_l3_with_parameters() {
         let data: L3Response = serde_json::from_value(json!({
-            "project": "notion",
+            "site": "notion",
             "group": "pages",
             "action": "retrieve_page",
             "method": "GET",
