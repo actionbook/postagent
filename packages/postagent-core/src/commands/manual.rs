@@ -1,6 +1,7 @@
 use reqwest::blocking::Client;
 use serde::Deserialize;
 
+use crate::api_response;
 use crate::config;
 use crate::formatter;
 
@@ -139,33 +140,27 @@ pub fn run(
 
     if !response.status().is_success() {
         let body: serde_json::Value = response.json()?;
-        if let Some(error) = body.get("error").and_then(|v| v.as_str()) {
-            eprintln!("{}", error);
-        }
-        if let Some(available) = body.get("available").and_then(|v| v.as_array()) {
-            let items: Vec<&str> = available.iter().filter_map(|v| v.as_str()).collect();
-            eprintln!("Available: {}", items.join(", "));
-        }
+        api_response::print_api_error(&body);
         std::process::exit(1);
     }
 
     let body_text = response.text()?;
+    let data = api_response::unwrap_data(serde_json::from_str(&body_text)?);
 
     if format == "json" {
-        let value: serde_json::Value = serde_json::from_str(&body_text)?;
-        println!("{}", serde_json::to_string_pretty(&value)?);
+        println!("{}", serde_json::to_string_pretty(&data)?);
         return Ok(());
     }
 
     if group.is_none() {
-        let data: L1Response = serde_json::from_str(&body_text)?;
-        println!("{}", format_l1(&data));
+        let l1: L1Response = serde_json::from_value(data)?;
+        println!("{}", format_l1(&l1));
     } else if action.is_none() {
-        let data: L2Response = serde_json::from_str(&body_text)?;
-        println!("{}", format_l2(&data, site));
+        let l2: L2Response = serde_json::from_value(data)?;
+        println!("{}", format_l2(&l2, site));
     } else {
-        let data: L3Response = serde_json::from_str(&body_text)?;
-        println!("{}", format_l3(&data));
+        let l3: L3Response = serde_json::from_value(data)?;
+        println!("{}", format_l3(&l3));
     }
 
     Ok(())

@@ -3,6 +3,7 @@ use std::collections::HashSet;
 use reqwest::blocking::Client;
 use serde::Deserialize;
 
+use crate::api_response;
 use crate::config;
 use crate::formatter;
 
@@ -52,21 +53,19 @@ pub fn run(query: &str, format: &str) -> Result<(), Box<dyn std::error::Error>> 
 
     if !response.status().is_success() {
         let body: serde_json::Value = response.json()?;
-        if let Some(error) = body.get("error").and_then(|v| v.as_str()) {
-            eprintln!("{}", error);
-        }
+        api_response::print_api_error(&body);
         std::process::exit(1);
     }
 
     let body_text = response.text()?;
+    let data = api_response::unwrap_data(serde_json::from_str(&body_text)?);
 
     if format == "json" {
-        let value: serde_json::Value = serde_json::from_str(&body_text)?;
-        println!("{}", serde_json::to_string_pretty(&value)?);
+        println!("{}", serde_json::to_string_pretty(&data)?);
         return Ok(());
     }
 
-    let sites: Vec<SearchSite> = serde_json::from_str(&body_text)?;
+    let sites: Vec<SearchSite> = serde_json::from_value(data)?;
     let output = format_search_results(&sites, query);
     println!("{}", output);
     Ok(())
