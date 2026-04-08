@@ -24,6 +24,12 @@ pub enum Commands {
         format: String,
     },
     /// Get project/group/action details (progressive discovery)
+    #[command(after_help = "\
+Examples:
+  postagent manual notion                         List groups and actions
+  postagent manual notion pages                   List actions in a group
+  postagent manual notion pages create_page       Full action details
+  postagent manual feishu --format json            JSON output")]
     Manual {
         /// Project name
         project: Option<String>,

@@ -65,6 +65,7 @@ fn read_secret_pipe() -> Result<String, Box<dyn std::error::Error>> {
 
 #[cfg(unix)]
 fn read_secret_tty() -> Result<String, Box<dyn std::error::Error>> {
+    use std::io::Read;
     use std::os::unix::io::AsRawFd;
 
     let stdin = io::stdin();
@@ -77,24 +78,53 @@ fn read_secret_tty() -> Result<String, Box<dyn std::error::Error>> {
         t
     };
 
-    // Disable echo
+    // Disable echo and canonical mode (read char by char)
     unsafe {
         let mut t = original;
-        t.c_lflag &= !(libc::ECHO);
+        t.c_lflag &= !(libc::ECHO | libc::ICANON);
+        t.c_cc[libc::VMIN] = 1;
+        t.c_cc[libc::VTIME] = 0;
         libc::tcsetattr(fd, libc::TCSANOW, &t);
     }
 
     let mut input = String::new();
-    let result = io::stdin().read_line(&mut input);
+    let mut buf = [0u8; 1];
+    loop {
+        if stdin.lock().read_exact(&mut buf).is_err() {
+            break;
+        }
+        match buf[0] {
+            b'\n' | b'\r' => break,
+            // Backspace or DEL
+            0x7f | 0x08 => {
+                if !input.is_empty() {
+                    input.pop();
+                    eprint!("\x08 \x08");
+                    io::stderr().flush().ok();
+                }
+            }
+            // Ctrl-C
+            0x03 => {
+                unsafe { libc::tcsetattr(fd, libc::TCSANOW, &original) };
+                eprintln!();
+                std::process::exit(130);
+            }
+            c if c >= 0x20 => {
+                input.push(c as char);
+                eprint!("*");
+                io::stderr().flush().ok();
+            }
+            _ => {}
+        }
+    }
 
     // Restore original terminal settings
     unsafe {
         libc::tcsetattr(fd, libc::TCSANOW, &original);
     }
-    eprintln!(); // newline after hidden input
+    eprintln!();
 
-    result?;
-    Ok(input.trim().to_string())
+    Ok(input)
 }
 
 #[cfg(windows)]

@@ -72,7 +72,7 @@ struct RequestBody {
     #[serde(rename = "contentType")]
     #[allow(dead_code)]
     content_type: Option<String>,
-    schema: serde_json::Value,
+    schema: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -506,17 +506,18 @@ fn format_l3(data: &L3Response) -> String {
 
     // Request Body
     if let Some(ref body) = data.request_body {
-        output.push_str("\n  ## Request Body\n\n");
+        if let Some(ref schema) = body.schema {
+            output.push_str("\n  ## Request Body\n\n");
 
-        if let Some(props) = body.schema.get("properties") {
-            if let Some(props_obj) = props.as_object() {
-                output.push_str(&format_schema_table(props_obj, &body.schema));
+            if let Some(props) = schema.get("properties") {
+                if let Some(props_obj) = props.as_object() {
+                    output.push_str(&format_schema_table(props_obj, schema));
+                }
+            } else if let Some(desc) = schema.get("description").and_then(|v| v.as_str()) {
+                let type_str = schema.get("type").and_then(|v| v.as_str()).unwrap_or("object");
+                output.push_str(&format!("  Type: {}\n", type_str));
+                output.push_str(&format!("  {}\n", desc));
             }
-        } else if let Some(desc) = body.schema.get("description").and_then(|v| v.as_str()) {
-            // Schema without properties — just a description (e.g. "Block type-specific fields")
-            let type_str = body.schema.get("type").and_then(|v| v.as_str()).unwrap_or("object");
-            output.push_str(&format!("  Type: {}\n", type_str));
-            output.push_str(&format!("  {}\n", desc));
         }
     }
 
