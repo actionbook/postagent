@@ -33,7 +33,6 @@
     "postagent-darwin-arm64": "workspace:*",
     "postagent-darwin-x64": "workspace:*",
     "postagent-linux-x64-gnu": "workspace:*",
-    "postagent-linux-arm64-gnu": "workspace:*",
-    "postagent-win32-x64": "workspace:*"
+    "postagent-linux-arm64-gnu": "workspace:*"
   }
 }

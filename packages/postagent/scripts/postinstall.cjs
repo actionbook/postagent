@@ -10,7 +10,6 @@ const PLATFORM_PACKAGES = {
   "darwin-x64": "postagent-darwin-x64",
   "linux-x64": "postagent-linux-x64-gnu",
   "linux-arm64": "postagent-linux-arm64-gnu",
-  "win32-x64": "postagent-win32-x64",
 };
 
 function resolvePackageDir(packageName) {
@@ -32,12 +31,11 @@ function main() {
   const packageName = PLATFORM_PACKAGES[platformKey];
   if (!packageName) return;
 
-  const binaryName = process.platform === "win32" ? "postagent-core.exe" : "postagent-core";
   const packageDir = resolvePackageDir(packageName);
   if (!packageDir) return;
 
-  const binaryPath = path.join(packageDir, "bin", binaryName);
-  if (fs.existsSync(binaryPath) && process.platform !== "win32") {
+  const binaryPath = path.join(packageDir, "bin", "postagent-core");
+  if (fs.existsSync(binaryPath)) {
     fs.chmodSync(binaryPath, 0o755);
   }
 }

@@ -8,7 +8,6 @@ const PLATFORM_PACKAGES: Record<string, string> = {
   "darwin-x64": "postagent-darwin-x64",
   "linux-x64": "postagent-linux-x64-gnu",
   "linux-arm64": "postagent-linux-arm64-gnu",
-  "win32-x64": "postagent-win32-x64",
 };
 
 const require = createRequire(import.meta.url);
@@ -54,7 +53,7 @@ export function resolveBinary(): string {
     process.exit(1);
   }
 
-  const binaryName = process.platform === "win32" ? "postagent-core.exe" : "postagent-core";
+  const binaryName = "postagent-core";
   const packageDir = resolvePackageDir(packageName);
 
   if (!packageDir) {

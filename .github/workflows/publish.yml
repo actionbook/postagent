@@ -31,10 +31,6 @@ jobs:
             runner: ubuntu-latest
             package: postagent-linux-arm64-gnu
             binary: postagent-core
-          - target: x86_64-pc-windows-msvc
-            runner: windows-latest
-            package: postagent-win32-x64
-            binary: postagent-core.exe
 
     runs-on: ${{ matrix.runner }}
 
@@ -85,7 +81,7 @@ jobs:
 
       - name: Place binaries into platform packages
         run: |
-          for pkg in postagent-darwin-arm64 postagent-darwin-x64 postagent-linux-x64-gnu postagent-linux-arm64-gnu postagent-win32-x64; do
+          for pkg in postagent-darwin-arm64 postagent-darwin-x64 postagent-linux-x64-gnu postagent-linux-arm64-gnu; do
             cp artifacts/$pkg/* packages/$pkg/bin/
           done
           chmod +x packages/postagent-darwin-*/bin/postagent-core
@@ -99,7 +95,7 @@ jobs:
 
       - name: Publish platform packages
         run: |
-          for pkg in postagent-darwin-arm64 postagent-darwin-x64 postagent-linux-x64-gnu postagent-linux-arm64-gnu postagent-win32-x64; do
+          for pkg in postagent-darwin-arm64 postagent-darwin-x64 postagent-linux-x64-gnu postagent-linux-arm64-gnu; do
             pnpm --filter $pkg publish --no-git-checks --access public
           done
         env:
