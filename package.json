@@ -1,5 +1,6 @@
 {
   "private": true,
+  "packageManager": "pnpm@10.32.1",
   "scripts": {
     "build": "pnpm -r build",
     "build:core": "cd packages/postagent-core && cargo build --release",
