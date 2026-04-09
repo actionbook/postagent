@@ -14,7 +14,7 @@ npm install -g postagent
 # Search related actions
 postagent search "Create a document on Notion"
 
-# Get the detailed manual for an action
+# Get detailed manual for an action
 postagent manual notion pages create_page
 
 # Auth and send request
