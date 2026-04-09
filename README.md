@@ -11,8 +11,13 @@ npm install -g postagent
 ## Quickstart
 
 ```bash
+# Search related actions
 postagent search "Create a document on Notion"
+
+# Get the detailed manual for an action
 postagent manual notion pages create_page
+
+# Auth and send request
 postagent auth notion
 postagent send -X POST https://api.notion.com/v1/pages \
   -H "Authorization: Bearer $POSTAGENT.NOTION.TOKEN" \
