@@ -1,14 +1,26 @@
 use regex::Regex;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 const DEFAULT_PROFILE: &str = "default";
 
+#[derive(Serialize, Deserialize, Default)]
+struct AuthConfig {
+    #[serde(flatten)]
+    fields: BTreeMap<String, String>,
+}
+
 fn token_dir_with_base(base: &Path, site: &str) -> PathBuf {
     base.join(".postagent")
+        .join("profiles")
         .join(DEFAULT_PROFILE)
-        .join("default")
         .join(site.to_lowercase())
+}
+
+fn auth_file(base: &Path, site: &str) -> PathBuf {
+    token_dir_with_base(base, site).join("auth.yaml")
 }
 
 pub fn save_token(site: &str, token: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -19,8 +31,14 @@ pub fn save_token(site: &str, token: &str) -> Result<(), Box<dyn std::error::Err
 fn save_token_to(base: &Path, site: &str, token: &str) -> Result<(), Box<dyn std::error::Error>> {
     let dir = token_dir_with_base(base, site);
     fs::create_dir_all(&dir)?;
-    let file = dir.join("auth");
-    fs::write(&file, token)?;
+    let file = auth_file(base, site);
+
+    // Load existing config or create new
+    let mut config = load_config(base, site).unwrap_or_default();
+    config.fields.insert("api_key".to_string(), token.to_string());
+
+    let yaml = serde_yaml::to_string(&config)?;
+    fs::write(&file, yaml)?;
     set_file_permissions(&file)?;
     Ok(())
 }
@@ -30,9 +48,14 @@ pub fn load_token(site: &str) -> Option<String> {
     load_token_from(&home, site)
 }
 
+fn load_config(base: &Path, site: &str) -> Option<AuthConfig> {
+    let content = fs::read_to_string(auth_file(base, site)).ok()?;
+    serde_yaml::from_str(&content).ok()
+}
+
 fn load_token_from(base: &Path, site: &str) -> Option<String> {
-    let file = token_dir_with_base(base, site).join("auth");
-    fs::read_to_string(file).ok().map(|s| s.trim().to_string())
+    let config = load_config(base, site)?;
+    config.fields.get("api_key").cloned()
 }
 
 pub fn resolve_template_variables(input: &str) -> Result<String, String> {
@@ -102,16 +125,16 @@ mod tests {
     }
 
     #[test]
-    fn load_token_trims_whitespace() {
+    fn load_token_from_yaml() {
         let tmp = TempDir::new().unwrap();
         let base = tmp.path();
 
-        // Manually write a token with trailing whitespace/newline
-        let dir = token_dir_with_base(base, "trimtest");
+        // Manually write a YAML auth file
+        let dir = token_dir_with_base(base, "yamltest");
         fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join("auth"), "  my-token  \n").unwrap();
+        fs::write(dir.join("auth.yaml"), "api_key: my-token\n").unwrap();
 
-        let loaded = load_token_from(base, "trimtest");
+        let loaded = load_token_from(base, "yamltest");
         assert_eq!(loaded, Some("my-token".to_string()));
     }
 
@@ -174,7 +197,7 @@ mod tests {
         assert_eq!(
             dir,
             base.join(".postagent")
-                .join("default")
+                .join("profiles")
                 .join("default")
                 .join("myapi")
         );
@@ -189,7 +212,7 @@ mod tests {
         let base = tmp.path();
 
         save_token_to(base, "permtest", "secret").unwrap();
-        let file = token_dir_with_base(base, "permtest").join("auth");
+        let file = auth_file(base, "permtest");
         let mode = fs::metadata(&file).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
     }

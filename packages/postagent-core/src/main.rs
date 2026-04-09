@@ -37,6 +37,9 @@ fn main() {
             result
         }
         Commands::Auth { site } => commands::auth::run(site),
+        Commands::Config { action, key, value } => {
+            commands::config::run(action, key.as_deref(), value.as_deref())
+        }
         Commands::Send {
             url,
             method,

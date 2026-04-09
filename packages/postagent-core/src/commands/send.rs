@@ -3,12 +3,28 @@ use reqwest::blocking::Client;
 use std::collections::HashMap;
 use std::time::Duration;
 
+fn contains_token_template(s: &str) -> bool {
+    regex::Regex::new(r"\$POSTAGENT\.[A-Za-z0-9_]+\.API_KEY")
+        .unwrap()
+        .is_match(s)
+}
+
 pub fn run(
     raw_url: &str,
     method: Option<&str>,
     headers: &[String],
     data: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // 0. Check for token template
+    let has_token = contains_token_template(raw_url)
+        || headers.iter().any(|h| contains_token_template(h))
+        || data.map_or(false, |d| contains_token_template(d));
+    if !has_token {
+        eprintln!("Missing $POSTAGENT.<SITE>.API_KEY in headers or body.\n");
+        eprintln!("Example: -H 'Authorization: Bearer $POSTAGENT.GITHUB.API_KEY'");
+        std::process::exit(1);
+    }
+
     // 1. Template variable substitution
     let url = match resolve_template_variables(raw_url) {
         Ok(u) => u,

@@ -2,16 +2,20 @@ use crate::token;
 use std::io::{self, Write};
 
 pub fn run(site: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let api_key = read_secret(&format!("Enter API key for \"{}\": ", site))?;
+    let site_lower = site.to_lowercase();
+    let key_var = format!("$POSTAGENT.{}.API_KEY", site.to_uppercase());
+
+    eprintln!("Go to the {} dashboard to find your API key or access token.\n", site_lower);
+    let api_key = read_secret(&format!("Enter credentials (API key/access token) for \"{}\": ", site_lower))?;
 
     if api_key.is_empty() {
-        eprintln!("Error: API key cannot be empty.");
+        eprintln!("Error: credentials cannot be empty.");
         std::process::exit(1);
     }
 
     match token::save_token(site, &api_key) {
         Ok(()) => {
-            println!("Auth saved for \"{}\".", site.to_lowercase());
+            println!("\nCredentials saved. Pass {} in `postagent send` and it will be replaced with your saved credentials.", key_var);
             Ok(())
         }
         Err(e) => {

@@ -14,8 +14,9 @@ use clap::{Parser, Subcommand};
 Commands:
   search <KEYWORD>                      Search actions by keyword
   manual [SITE] [GROUP] [ACTION]        Browse API reference (progressive discovery)
-  auth <SITE>                           Save API key for a site
-  send <URL> [-X METHOD] [-H HEADER]    Send an HTTP request
+  auth <SITE>                           Save credentials for a site
+  config <set|get> <KEY> [VALUE]        Manage config values
+  send <CURL_QUERY>                     Send an HTTP request
 
 Options:
 {options}"
@@ -58,7 +59,7 @@ Examples:
         #[arg(long, default_value = "markdown")]
         format: String,
     },
-    /// Save API key for a site
+    /// Save credentials for a site
     #[command(after_help = "\
 Examples:
   postagent auth github
@@ -69,6 +70,19 @@ For example, after `postagent auth github`, use $POSTAGENT.GITHUB.API_KEY in hea
     Auth {
         /// Site name
         site: String,
+    },
+    /// Set or get config values
+    #[command(after_help = "\
+Examples:
+  postagent config set apiKey ak_xxxxxxxxxxxx
+  postagent config get apiKey")]
+    Config {
+        /// Action: set or get
+        action: String,
+        /// Config key
+        key: Option<String>,
+        /// Config value (required for set)
+        value: Option<String>,
     },
     /// Send an HTTP request
     #[command(after_help = "\

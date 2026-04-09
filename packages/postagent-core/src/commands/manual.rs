@@ -192,7 +192,7 @@ fn extract_meta_from_l1(data: &L1Response) -> SiteMeta {
         });
 
     // Auth from authentication struct
-    let auth = data.authentication.as_ref().map(|a| format_auth_from_struct(a));
+    let auth = data.authentication.as_ref().map(|a| format_auth_from_struct(a, &data.name));
 
     // Version header from description
     let header = {
@@ -216,7 +216,7 @@ fn extract_meta_from_l1(data: &L1Response) -> SiteMeta {
 
     if is_graphql {
         let endpoint = base_url.as_ref().map(|u| format!("POST {}", u));
-        let gql_auth = data.authentication.as_ref().map(|a| format_auth_from_struct(a));
+        let gql_auth = data.authentication.as_ref().map(|a| format_auth_from_struct(a, &data.name));
 
         SiteMeta {
             base_url: None,
@@ -238,13 +238,13 @@ fn extract_meta_from_l1(data: &L1Response) -> SiteMeta {
     }
 }
 
-fn format_auth_from_struct(auth: &Authentication) -> String {
+fn format_auth_from_struct(auth: &Authentication, site: &str) -> String {
     let name = auth.name.as_deref().unwrap_or("Authorization");
+    let key_var = format!("$POSTAGENT.{}.API_KEY", site.to_uppercase());
     if auth.auth_type == "bearer" {
-        format!("{}: Bearer <token>", name)
+        format!("{}: Bearer {}", name, key_var)
     } else {
-        let desc = auth.description.as_deref().unwrap_or(&auth.auth_type);
-        format!("{}: <{}>", name, desc)
+        format!("{}: {}", name, key_var)
     }
 }
 
@@ -280,6 +280,16 @@ fn format_l1(data: &L1Response) -> String {
             output.push_str(&format!("  Source:    {}\n", source));
         }
     }
+
+    if data.authentication.is_some() {
+        let key_var = format!("$POSTAGENT.{}.API_KEY", data.name.to_uppercase());
+        output.push_str(&format!(
+            "\n  `postagent send` will replace {} with your saved credentials.\n",
+            key_var
+        ));
+    }
+
+    output.push_str("\n  ---\n");
 
     // Render groups
     let mut total_actions = 0;
@@ -351,8 +361,14 @@ fn format_l2(data: &L2Response, site: &str) -> String {
     }
 
     output.push_str(
-        "\n  Run postagent manual <site> <group> <action> for full details.",
+        "\n  Run postagent manual <site> <group> <action> for full details.\n",
     );
+    if let Some(first_action) = data.actions.first() {
+        output.push_str(&format!(
+            "  Example: postagent manual {} {} {}",
+            site, data.group, first_action.name
+        ));
+    }
 
     output
 }
@@ -451,7 +467,12 @@ fn format_l3(data: &L3Response) -> String {
         }
     }
     if let Some(ref auth) = data.authentication {
-        output.push_str(&format!("  auth:      {}\n", format_auth_from_struct(auth)));
+        output.push_str(&format!("  auth:      {}\n", format_auth_from_struct(auth, &data.site)));
+        let key_var = format!("$POSTAGENT.{}.API_KEY", data.site.to_uppercase());
+        output.push_str(&format!(
+            "\n  `postagent send` will replace {} with your saved credentials.\n",
+            key_var
+        ));
     }
 
     // Separator
