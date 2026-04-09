@@ -71,7 +71,7 @@ Visit [https://api.postagent.dev/supported-sites.md](https://api.postagent.dev/s
 
 We move fast. Star Postagent on Github to support and get latest information.
 
-![star-postagent](https://github.com/user-attachments/assets/1b07074e-d59a-420a-a313-4e2238952c6b)
+![star-postagent-original](https://github.com/user-attachments/assets/ba15bfe6-04ec-4e24-bce8-4f717547f8fd)
 
 ## Development
 
