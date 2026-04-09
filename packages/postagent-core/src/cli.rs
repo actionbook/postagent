@@ -15,7 +15,7 @@ Commands:
   search <KEYWORD>                      Search actions by keyword
   manual [SITE] [GROUP] [ACTION]        Browse API reference (progressive discovery)
   auth <SITE>                           Save credentials for a site
-  config <set|get> <KEY> [VALUE]        Manage config values
+  config <set|get> <KEY> [VALUE]        Manage postagent config
   send <CURL_QUERY>                     Send an HTTP request
 
 Options:
@@ -71,7 +71,7 @@ For example, after `postagent auth github`, use $POSTAGENT.GITHUB.API_KEY in hea
         /// Site name
         site: String,
     },
-    /// Set or get config values
+    /// Manage postagent config (stored in ~/.postagent/profiles/default/config.yaml)
     #[command(after_help = "\
 Examples:
   postagent config set apiKey ak_xxxxxxxxxxxx
