@@ -504,11 +504,6 @@ fn format_action_detail(data: &ActionDetail) -> String {
     }
     if let Some(ref auth) = data.authentication {
         output.push_str(&format!("  auth:      {}\n", format_auth_from_struct(auth, &data.site)));
-        let key_var = format!("$POSTAGENT.{}.API_KEY", data.site.to_uppercase());
-        output.push_str(&format!(
-            "\n  `postagent send` will replace {} with your saved credentials.\n",
-            key_var
-        ));
     }
 
     // Separator
@@ -583,6 +578,17 @@ fn format_action_detail(data: &ActionDetail) -> String {
                 }
             }
         }
+    }
+
+    // Send hint
+    output.push_str("\n  ---\n\n");
+    output.push_str("  Next step: use `postagent send <CURL_QUERY>` to send an HTTP request with a cURL syntax.\n");
+    if data.authentication.is_some() {
+        let key_var = format!("$POSTAGENT.{}.API_KEY", data.site.to_uppercase());
+        output.push_str(&format!(
+            "  `postagent send` will replace {} with your saved credentials.\n",
+            key_var
+        ));
     }
 
     output.trim_end().to_string()
