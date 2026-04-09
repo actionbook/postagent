@@ -63,6 +63,10 @@ postagent manual <site> [group] [action]    # Get detailed manual for an action
 postagent send [options]                    # Send a request to a site, the options is same as curl
 ```
 
+## Supported sites
+
+Visit [https://api.postagent.dev/supported-sites.md](https://api.postagent.dev/supported-sites.md) to get the full list of supported sites. We are continually expanding it.
+
 ## Development
 
 ```bash
