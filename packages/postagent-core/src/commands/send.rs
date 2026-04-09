@@ -77,8 +77,10 @@ pub fn run(
         );
     }
 
-    // 3.5. Inject x-api-key from config if set
-    if let Some(api_key) = super::config::get_value("apiKey") {
+    // 3.5. Inject x-api-key: env POSTAGENT_API_KEY > config apiKey
+    if let Ok(api_key) = std::env::var("POSTAGENT_API_KEY") {
+        merged_headers.insert("x-api-key".to_string(), api_key);
+    } else if let Some(api_key) = super::config::get_value("apiKey") {
         merged_headers.insert("x-api-key".to_string(), api_key);
     }
 

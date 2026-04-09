@@ -36,7 +36,7 @@ fn main() {
             }
             result
         }
-        Commands::Auth { site } => commands::auth::run(site),
+        Commands::Auth { site, token } => commands::auth::run(site, token.as_deref()),
         Commands::Config { action, key, value } => {
             commands::config::run(action, key.as_deref(), value.as_deref())
         }

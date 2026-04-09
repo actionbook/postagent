@@ -19,11 +19,34 @@ struct Authentication {
 }
 
 #[derive(Deserialize)]
+#[serde(untagged)]
+enum SiteAction {
+    Simple(String),
+    Detailed { name: String, summary: Option<String> },
+}
+
+impl SiteAction {
+    fn name(&self) -> &str {
+        match self {
+            SiteAction::Simple(s) => s,
+            SiteAction::Detailed { name, .. } => name,
+        }
+    }
+
+    fn summary(&self) -> Option<&str> {
+        match self {
+            SiteAction::Simple(_) => None,
+            SiteAction::Detailed { summary, .. } => summary.as_deref(),
+        }
+    }
+}
+
+#[derive(Deserialize)]
 struct SiteGroup {
     name: String,
     #[allow(dead_code)]
     base_url: Option<String>,
-    actions: Vec<String>,
+    actions: Vec<SiteAction>,
 }
 
 #[derive(Deserialize)]
@@ -281,52 +304,63 @@ fn format_site_overview(data: &SiteOverview) -> String {
         }
     }
 
-    if data.authentication.is_some() {
-        let key_var = format!("$POSTAGENT.{}.API_KEY", data.name.to_uppercase());
-        output.push_str(&format!(
-            "\n  `postagent send` will replace {} with your saved credentials.\n",
-            key_var
-        ));
-    }
-
-    output.push_str("\n  ---\n");
-
-    // Render groups
-    let mut total_actions = 0;
-    for group in &data.groups {
-        let count = group.actions.len();
-        total_actions += count;
-        output.push_str(&format!("\n  {}:\n", group.name));
-
-        if count <= 10 {
-            let max_name_width = group.actions.iter().map(|a| a.len()).max().unwrap_or(0);
-            for action in &group.actions {
-                output.push_str(&format!("    {:<width$}\n", action, width = max_name_width));
-            }
-        } else {
-            let display_actions = &group.actions[..5];
-            let max_name_width = display_actions.iter().map(|a| a.len()).max().unwrap_or(0);
-            for action in display_actions {
-                output.push_str(&format!("    {:<width$}\n", action, width = max_name_width));
-            }
-            output.push_str(&format!("    ... {} more actions\n", count - 5));
-        }
-    }
-
+    let total_actions: usize = data.groups.iter().map(|g| g.actions.len()).sum();
     output.push_str(&format!(
         "\n  {} groups, {} actions total\n",
         data.groups.len(),
         total_actions
     ));
 
+    output.push_str("\n  ---\n");
+
+    // Render groups
+    for group in &data.groups {
+        let count = group.actions.len();
+        output.push_str(&format!("\n  {}\n", group.name));
+
+        let render_actions = if count <= 10 {
+            &group.actions[..]
+        } else {
+            &group.actions[..5]
+        };
+
+        let has_summary = render_actions.iter().any(|a| a.summary().is_some());
+        if has_summary {
+            let mut table_rows: Vec<Vec<String>> = Vec::new();
+            for action in render_actions {
+                table_rows.push(vec![
+                    action.name().to_string(),
+                    action.summary().unwrap_or("").to_string(),
+                ]);
+            }
+            let aligned = formatter::align_columns(&table_rows, 2);
+            for line in &aligned {
+                output.push_str(&format!("    {}\n", line));
+            }
+        } else {
+            let max_name_width = render_actions.iter().map(|a| a.name().len()).max().unwrap_or(0);
+            for action in render_actions {
+                output.push_str(&format!("    {:<width$}\n", action.name(), width = max_name_width));
+            }
+        }
+
+        if count > 10 {
+            output.push_str(&format!("    ... {} more actions\n", count - 5));
+        }
+    }
+
     output.push_str(
-        "\n  Run postagent manual <site> <group> <action> for full details.\n",
+        "\n  Run postagent manual <SITE> [GROUP] [ACTION] for full details.\n",
     );
     if let Some(first_group) = data.groups.first() {
+        output.push_str(&format!(
+            "  Example: postagent manual {} {}  # List actions in group\n",
+            data.name, first_group.name
+        ));
         if let Some(first_action) = first_group.actions.first() {
             output.push_str(&format!(
-                "  Example: postagent manual {} {} {}",
-                data.name, first_group.name, first_action
+                "           postagent manual {} {} {}  # Get full details of action",
+                data.name, first_group.name, first_action.name()
             ));
         }
     }
@@ -341,9 +375,11 @@ fn format_group_overview(data: &GroupOverview, site: &str) -> String {
 
     let mut output = String::new();
 
-    output.push_str(&format!("  {}/{} — {} actions\n", site, data.group, total));
+    output.push_str(&format!("  site:      {}\n", site));
+    output.push_str(&format!("  group:     {}\n", data.group));
+    output.push_str(&format!("  actions:   {}\n", total));
 
-    output.push_str("\n  Actions:\n");
+    output.push_str("\n  ---\n");
 
     let mut table_rows: Vec<Vec<String>> = Vec::new();
     for a in &data.actions {
@@ -361,11 +397,11 @@ fn format_group_overview(data: &GroupOverview, site: &str) -> String {
     }
 
     output.push_str(
-        "\n  Run postagent manual <site> <group> <action> for full details.\n",
+        "\n  Run postagent manual <SITE> [GROUP] [ACTION] for full details.\n",
     );
     if let Some(first_action) = data.actions.first() {
         output.push_str(&format!(
-            "  Example: postagent manual {} {} {}",
+            "  Example: postagent manual {} {} {}  # Get full details of action",
             site, data.group, first_action.name
         ));
     }
@@ -631,8 +667,8 @@ mod tests {
         assert!(output.contains("Base URL:"));
         assert!(output.contains("https://api.notion.com"));
         assert!(output.contains("Auth:"));
-        assert!(output.contains("blocks:"));
-        assert!(output.contains("pages:"));
+        assert!(output.contains("blocks"));
+        assert!(output.contains("pages"));
         assert!(output.contains("retrieve_block"));
         assert!(output.contains("create_page"));
         assert!(output.contains("2 groups, 5 actions total"));
@@ -640,7 +676,7 @@ mod tests {
 
     #[test]
     fn format_site_overview_truncation() {
-        let actions: Vec<String> = (0..15).map(|i| format!("action_{}", i)).collect();
+        let actions: Vec<SiteAction> = (0..15).map(|i| SiteAction::Simple(format!("action_{}", i))).collect();
         let data = SiteOverview {
             name: "test".into(),
             description: "".into(),
@@ -667,7 +703,7 @@ mod tests {
             groups: vec![SiteGroup {
                 name: "pages".into(),
                 base_url: Some("https://api.notion.com".into()),
-                actions: vec!["create_page".into()],
+                actions: vec![SiteAction::Simple("create_page".into())],
             }],
         };
 
@@ -688,13 +724,14 @@ mod tests {
         .unwrap();
 
         let output = format_group_overview(&data, "notion");
-        assert!(output.contains("notion/pages — 2 actions"));
-        assert!(output.contains("Actions:"));
+        assert!(output.contains("site:      notion"));
+        assert!(output.contains("group:     pages"));
+        assert!(output.contains("actions:   2"));
         assert!(output.contains("create_page"));
         assert!(output.contains("POST"));
         assert!(output.contains("/v1/pages"));
         assert!(output.contains("Create a page"));
-        assert!(output.contains("Run postagent manual <site> <group> <action> for full details."));
+        assert!(output.contains("Run postagent manual <SITE> [GROUP] [ACTION] for full details."));
     }
 
     #[test]
@@ -718,7 +755,9 @@ mod tests {
         .unwrap();
 
         let output = format_group_overview(&data, "example");
-        assert!(output.contains("example/pages — 25 actions"));
+        assert!(output.contains("site:      example"));
+        assert!(output.contains("group:     pages"));
+        assert!(output.contains("actions:   25"));
         assert!(output.contains("action_0"));
         assert!(output.contains("action_24"));
         assert!(!output.contains("showing first 20"));

@@ -13,7 +13,7 @@ use clap::{Parser, Subcommand};
 
 Commands:
   search <KEYWORD>                      Search actions by keyword
-  manual [SITE] [GROUP] [ACTION]        Browse API reference (progressive discovery)
+  manual <SITE> [GROUP] [ACTION]        Browse API reference (progressive discovery)
   auth <SITE>                           Save credentials for a site
   config <set|get> <KEY> [VALUE]        Manage postagent config
   send <CURL_QUERY>                     Send an HTTP request
@@ -42,7 +42,7 @@ Examples:
         json: bool,
     },
     /// Get site/group/action details (progressive discovery)
-    #[command(after_help = "\
+    #[command(alias = "man", after_help = "\
 Examples:
   postagent manual notion                         List groups and actions
   postagent manual notion pages                   List actions in a group
@@ -64,12 +64,16 @@ Examples:
 Examples:
   postagent auth github
   postagent auth openai
+  postagent auth github --token sk-xxxxxxxxxxxx
 
 Saved keys can be referenced in `send` as $POSTAGENT.<SITE>.API_KEY
 For example, after `postagent auth github`, use $POSTAGENT.GITHUB.API_KEY in headers.")]
     Auth {
         /// Site name
         site: String,
+        /// API key or access token (non-interactive)
+        #[arg(long)]
+        token: Option<String>,
     },
     /// Manage postagent config (stored in ~/.postagent/profiles/default/config.yaml)
     #[command(after_help = "\
@@ -167,7 +171,7 @@ mod tests {
     #[test]
     fn parse_auth_command() {
         let cli = Cli::parse_from(["postagent", "auth", "openai"]);
-        assert!(matches!(cli.command, Commands::Auth { site } if site == "openai"));
+        assert!(matches!(cli.command, Commands::Auth { ref site, token: None } if site == "openai"));
     }
 
     #[test]

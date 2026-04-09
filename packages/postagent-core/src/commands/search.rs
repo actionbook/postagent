@@ -162,44 +162,60 @@ fn format_search_results(sites: &[SearchSite], query: &str) -> String {
         .len();
     let result_count = rows.len();
 
-    // Group by site/group, preserving score order
-    let mut groups: Vec<(String, Vec<&FlatRow>)> = Vec::new();
+    // Group by site -> group, preserving score order
+    let mut sites: Vec<(String, Vec<(String, Vec<&FlatRow>)>)> = Vec::new();
     for r in &rows {
-        let key = format!("{}/{}", r.site, r.group);
-        if let Some((_k, items)) = groups.iter_mut().find(|(k, _)| k == &key) {
-            items.push(r);
+        let site_entry = sites.iter_mut().find(|(s, _)| s == &r.site);
+        if let Some((_, groups)) = site_entry {
+            let group_entry = groups.iter_mut().find(|(g, _)| g == &r.group);
+            if let Some((_, items)) = group_entry {
+                items.push(r);
+            } else {
+                groups.push((r.group.clone(), vec![r]));
+            }
         } else {
-            groups.push((key, vec![r]));
+            sites.push((r.site.clone(), vec![(r.group.clone(), vec![r])]));
         }
     }
 
     let mut output = String::new();
 
-    for (key, items) in &groups {
-        output.push_str(&format!("  {}:\n", key));
+    output.push_str(&format!(
+        "  {} actions from {} sites\n\n",
+        result_count, site_count
+    ));
+    output.push_str("  Results are listed as:\n\n");
+    output.push_str("  site                        # API provider\n");
+    output.push_str("    group                     # Action group\n");
+    output.push_str("      action  summary         # Action name and description\n");
+    output.push_str("\n  ---\n\n");
 
-        let mut table_rows: Vec<Vec<String>> = Vec::new();
-        for r in items {
-            table_rows.push(vec![r.action.clone(), r.summary.clone()]);
-        }
+    for (site, groups) in &sites {
+        output.push_str(&format!("  {}\n", site));
+        for (group, items) in groups {
+            output.push_str(&format!("    {}\n", group));
 
-        let aligned = formatter::align_columns(&table_rows, 2);
-        for line in &aligned {
-            output.push_str(&format!("    {}\n", line));
+            let mut table_rows: Vec<Vec<String>> = Vec::new();
+            for r in items {
+                table_rows.push(vec![r.action.clone(), r.summary.clone()]);
+            }
+
+            let aligned = formatter::align_columns(&table_rows, 2);
+            for line in &aligned {
+                output.push_str(&format!("      {}\n", line));
+            }
         }
         output.push('\n');
     }
 
-    output.push_str(&format!(
-        "  {} results from {} sites\n",
-        result_count, site_count
-    ));
-
     // Hint with example using best match (first row)
-    output.push('\n');
-    output.push_str("  Run postagent manual <SITE> <GROUP> <ACTION> for full details.\n");
+    output.push_str("  Run postagent manual <SITE> [GROUP] [ACTION] for full details.\n");
     output.push_str(&format!(
-        "  Example: postagent manual {} {} {}",
+        "  Example: postagent manual {}  # List all groups and actions\n",
+        rows[0].site
+    ));
+    output.push_str(&format!(
+        "           postagent manual {} {} {}  # Get full details of action",
         rows[0].site, rows[0].group, rows[0].action
     ));
 
@@ -299,11 +315,12 @@ mod tests {
         }];
 
         let output = format_search_results(&sites, "create page notion");
-        assert!(output.contains("notion/pages:"));
-        assert!(output.contains("notion/databases:"));
+        assert!(output.contains("  notion\n"));
+        assert!(output.contains("    pages\n"));
+        assert!(output.contains("    databases\n"));
         assert!(output.contains("create_page"));
         assert!(output.contains("create_database"));
-        assert!(output.contains("Run postagent manual <SITE> <GROUP> <ACTION> for full details."));
+        assert!(output.contains("Run postagent manual <SITE> [GROUP] [ACTION] for full details."));
     }
 
     #[test]
@@ -338,9 +355,9 @@ mod tests {
         ];
 
         let output = format_search_results(&sites, "create page");
-        assert!(output.contains("notion/pages:"));
-        assert!(output.contains("coda/pages:"));
-        assert!(output.contains("results from 2 sites"));
+        assert!(output.contains("  notion\n"));
+        assert!(output.contains("  coda\n"));
+        assert!(output.contains("actions from 2 sites"));
     }
 
     #[test]
@@ -368,7 +385,7 @@ mod tests {
         }];
 
         let output = format_search_results(&sites, "create page");
-        assert!(output.contains("1 results from 1 sites"));
+        assert!(output.contains("1 actions from 1 sites"));
     }
 
     #[test]
