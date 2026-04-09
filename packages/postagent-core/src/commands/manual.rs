@@ -11,11 +11,11 @@ use crate::formatter;
 struct Authentication {
     #[serde(rename = "in")]
     #[allow(dead_code)]
-    location: String,
-    name: String,
+    location: Option<String>,
+    name: Option<String>,
     #[serde(rename = "type")]
     auth_type: String,
-    description: String,
+    description: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -192,13 +192,7 @@ fn extract_meta_from_l1(data: &L1Response) -> SiteMeta {
         });
 
     // Auth from authentication struct
-    let auth = data.authentication.as_ref().map(|a| {
-        if a.auth_type == "bearer" {
-            format!("{}: Bearer <token>", a.name)
-        } else {
-            format!("{}: <{}>", a.name, a.description)
-        }
-    });
+    let auth = data.authentication.as_ref().map(|a| format_auth_from_struct(a));
 
     // Version header from description
     let header = {
@@ -222,9 +216,7 @@ fn extract_meta_from_l1(data: &L1Response) -> SiteMeta {
 
     if is_graphql {
         let endpoint = base_url.as_ref().map(|u| format!("POST {}", u));
-        let gql_auth = data.authentication.as_ref().map(|a| {
-            format!("{}: <{}>", a.name, a.description)
-        });
+        let gql_auth = data.authentication.as_ref().map(|a| format_auth_from_struct(a));
 
         SiteMeta {
             base_url: None,
@@ -247,10 +239,12 @@ fn extract_meta_from_l1(data: &L1Response) -> SiteMeta {
 }
 
 fn format_auth_from_struct(auth: &Authentication) -> String {
+    let name = auth.name.as_deref().unwrap_or("Authorization");
     if auth.auth_type == "bearer" {
-        format!("{}: Bearer <token>", auth.name)
+        format!("{}: Bearer <token>", name)
     } else {
-        format!("{}: <{}>", auth.name, auth.description)
+        let desc = auth.description.as_deref().unwrap_or(&auth.auth_type);
+        format!("{}: <{}>", name, desc)
     }
 }
 

@@ -8,7 +8,7 @@
     "postagent-core": "bin/postagent-core"
   },
   "files": ["bin/postagent-core"],
-  "license": "ISC",
+  "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/actionbook/postagent.git",

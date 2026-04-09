@@ -11,8 +11,8 @@
     "scripts"
   ],
   "scripts": {
-    "dev": "POSTAGENT_DEV=1 tsx src/cli.ts",
     "build": "tsup",
+    "prepack": "cp ../../README.md .",
     "postinstall": "node scripts/postinstall.cjs",
     "typecheck": "tsc --noEmit"
   },
@@ -22,7 +22,7 @@
   },
   "keywords": [],
   "author": "",
-  "license": "ISC",
+  "license": "MIT",
   "devDependencies": {
     "@types/node": "^25.5.0",
     "tsup": "^8.5.1",

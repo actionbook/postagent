@@ -1,6 +1,6 @@
 # postagent
 
-CLI collection tool for AI agents. Discover and browse OpenAPI documentation for various services without WebSearch.
+CLI tool for AI agents. Discover and browse API documentation for various services without WebSearch.
 
 ## Install
 
@@ -10,31 +10,39 @@ npm install -g postagent
 
 ## Usage
 
+### Search
+
 ```bash
-# Search for services by keyword
 postagent search "code hosting"
+```
 
-# List resources of a site
-postagent get github
+### Manual (Progressive Discovery)
 
-# List actions of a resource
-postagent get github repo
+```bash
+postagent manual                       # List all sites
+postagent manual github                # List groups of a site
+postagent manual github repo           # List actions of a group
+postagent manual github repo list      # Get API doc for a specific action
+postagent manual github repo list --format json  # Output as JSON
+```
 
-# Get OpenAPI doc for a specific action
-postagent get github repo list
+### Send
 
-# Output as JSON
-postagent get github repo list --format json
+```bash
+postagent send https://api.example.com
+postagent send https://api.example.com -X POST -d '{"key":"value"}'
+postagent send https://api.example.com -H "Authorization: Bearer $POSTAGENT.<SITE>.API_KEY"
+```
+
+### Auth
+
+```bash
+postagent auth github                  # Save API key for a site
 ```
 
 ## Configuration
 
-```bash
-postagent config set apiUrl https://api.postagent.dev
-postagent config set apiKey pa_xxxxxxxxxxxx
-```
-
-Or via environment variables:
+Environment variables:
 
 ```bash
 export POSTAGENT_API_URL=https://api.postagent.dev
@@ -44,12 +52,12 @@ export POSTAGENT_API_KEY=pa_xxxxxxxxxxxx
 ## Development
 
 ```bash
-npm install
-npm run dev          # Run with tsx
-npm run build        # Build with tsup
-npm run typecheck    # Type check
+pnpm install
+pnpm dev                               # Run with POSTAGENT_DEV mode
+pnpm dev:watch                         # Watch Rust code and auto-rebuild
+pnpm build                             # Build for production
 ```
 
 ## License
 
-ISC
+MIT
