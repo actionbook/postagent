@@ -39,7 +39,7 @@ struct FlatRow {
     score: f64,
 }
 
-pub fn run(query: &str, format: &str) -> Result<(), Box<dyn std::error::Error>> {
+pub fn run(query: &str, json: bool) -> Result<(), Box<dyn std::error::Error>> {
     let client = Client::new();
     let url = format!("{}/api/search?q={}", config::api_base(), urlencoding(query));
 
@@ -60,7 +60,7 @@ pub fn run(query: &str, format: &str) -> Result<(), Box<dyn std::error::Error>> 
     let body_text = response.text()?;
     let data = api_response::unwrap_data(serde_json::from_str(&body_text)?);
 
-    if format == "json" {
+    if json {
         println!("{}", serde_json::to_string_pretty(&data)?);
         return Ok(());
     }

@@ -37,9 +37,9 @@ Examples:
     Search {
         /// What you want to do, e.g. "send a message"
         keyword: String,
-        /// Output format: markdown / json
-        #[arg(long, default_value = "markdown")]
-        format: String,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
     /// Get site/group/action details (progressive discovery)
     #[command(after_help = "\
@@ -47,7 +47,7 @@ Examples:
   postagent manual notion                         List groups and actions
   postagent manual notion pages                   List actions in a group
   postagent manual notion pages create_page       Full action details
-  postagent manual notion --format json            JSON output")]
+  postagent manual notion --json                   JSON output")]
     Manual {
         /// Site name
         site: Option<String>,
@@ -55,9 +55,9 @@ Examples:
         group: Option<String>,
         /// Action name
         action: Option<String>,
-        /// Output format: markdown / json
-        #[arg(long, default_value = "markdown")]
-        format: String,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
     /// Save credentials for a site
     #[command(after_help = "\
@@ -117,13 +117,13 @@ mod tests {
     #[test]
     fn parse_search_command() {
         let cli = Cli::parse_from(["postagent", "search", "github"]);
-        assert!(matches!(cli.command, Commands::Search { ref keyword, ref format } if keyword == "github" && format == "markdown"));
+        assert!(matches!(cli.command, Commands::Search { ref keyword, json } if keyword == "github" && !json));
     }
 
     #[test]
-    fn parse_search_with_json_format() {
-        let cli = Cli::parse_from(["postagent", "search", "test", "--format", "json"]);
-        assert!(matches!(cli.command, Commands::Search { ref keyword, ref format } if keyword == "test" && format == "json"));
+    fn parse_search_with_json_flag() {
+        let cli = Cli::parse_from(["postagent", "search", "test", "--json"]);
+        assert!(matches!(cli.command, Commands::Search { ref keyword, json } if keyword == "test" && json));
     }
 
     #[test]
@@ -203,20 +203,20 @@ mod tests {
     }
 
     #[test]
-    fn format_flag_on_search() {
-        let cli = Cli::parse_from(["postagent", "search", "test", "--format", "json"]);
-        assert!(matches!(cli.command, Commands::Search { ref format, .. } if format == "json"));
+    fn json_flag_on_search() {
+        let cli = Cli::parse_from(["postagent", "search", "test", "--json"]);
+        assert!(matches!(cli.command, Commands::Search { json, .. } if json));
     }
 
     #[test]
-    fn default_format_is_markdown() {
+    fn default_no_json() {
         let cli = Cli::parse_from(["postagent", "search", "test"]);
-        assert!(matches!(cli.command, Commands::Search { ref format, .. } if format == "markdown"));
+        assert!(matches!(cli.command, Commands::Search { json, .. } if !json));
     }
 
     #[test]
-    fn format_flag_on_manual() {
-        let cli = Cli::parse_from(["postagent", "manual", "github", "--format", "json"]);
-        assert!(matches!(cli.command, Commands::Manual { ref format, .. } if format == "json"));
+    fn json_flag_on_manual() {
+        let cli = Cli::parse_from(["postagent", "manual", "github", "--json"]);
+        assert!(matches!(cli.command, Commands::Manual { json, .. } if json));
     }
 }

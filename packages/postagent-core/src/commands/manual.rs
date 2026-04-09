@@ -103,7 +103,7 @@ pub fn run(
     site: Option<&str>,
     group: Option<&str>,
     action: Option<&str>,
-    format: &str,
+    json: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let site = match site {
         Some(p) => p,
@@ -147,7 +147,7 @@ pub fn run(
     let body_text = response.text()?;
     let data = api_response::unwrap_data(serde_json::from_str(&body_text)?);
 
-    if format == "json" {
+    if json {
         println!("{}", serde_json::to_string_pretty(&data)?);
         return Ok(());
     }
@@ -582,7 +582,7 @@ mod tests {
 
     #[test]
     fn run_without_site_returns_show_help() {
-        let result = run(None, None, None, "markdown");
+        let result = run(None, None, None, false);
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().to_string(), "show_help");
     }
