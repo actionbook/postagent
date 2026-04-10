@@ -14,7 +14,7 @@ use clap::{Parser, Subcommand};
 Commands:
   search <KEYWORD>                      Search actions by keyword
   manual <SITE> [GROUP] [ACTION]        Browse API reference (progressive discovery)
-  auth <SITE>                           Save credentials for a site
+  auth <SITE> [--token <TOKEN>]         Save credentials for a site
   config <set|get> <KEY> [VALUE]        Manage postagent config
   send <CURL_QUERY>                     Send an HTTP request
 
