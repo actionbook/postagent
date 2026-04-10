@@ -35,9 +35,6 @@ importers:
       postagent-linux-x64-gnu:
         specifier: workspace:*
         version: link:../postagent-linux-x64-gnu
-      postagent-win32-x64:
-        specifier: workspace:*
-        version: link:../postagent-win32-x64
 
   packages/postagent-darwin-arm64: {}
 
@@ -46,8 +43,6 @@ importers:
   packages/postagent-linux-arm64-gnu: {}
 
   packages/postagent-linux-x64-gnu: {}
-
-  packages/postagent-win32-x64: {}
 
 packages:
 
