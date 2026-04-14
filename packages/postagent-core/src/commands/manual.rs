@@ -542,10 +542,18 @@ fn format_schema_table(schema: &serde_json::Value, depth_budget: usize) -> Optio
 // `format_schema_table` produces no rows (e.g. a response that's a bare $ref,
 // or `array<$ref>`) so we still surface *something* about the shape.
 fn describe_top_type(schema: &serde_json::Value) -> String {
+    describe_top_type_with_depth(schema, 0)
+}
+
+fn describe_top_type_with_depth(schema: &serde_json::Value, walk_depth: usize) -> String {
+    if walk_depth >= MAX_WALK_DEPTH {
+        return "any".to_string();
+    }
+
     let t = extract_type(schema);
     if t == "array" {
         if let Some(items) = schema.get("items") {
-            return format!("array<{}>", describe_top_type(items));
+            return format!("array<{}>", describe_top_type_with_depth(items, walk_depth + 1));
         }
     }
     t
@@ -1208,5 +1216,21 @@ mod tests {
         assert!(output.contains("Type: array<projects-v2>"));
         assert!(output.contains("**204**"));
         assert!(output.contains("Type: projects-v2"));
+    }
+
+    #[test]
+    fn describe_top_type_caps_deeply_nested_arrays() {
+        let mut schema = json!({ "$ref": "#/components/schemas/projects-v2" });
+        for _ in 0..=MAX_WALK_DEPTH {
+            schema = json!({
+                "type": "array",
+                "items": schema
+            });
+        }
+
+        let rendered = describe_top_type(&schema);
+        assert!(rendered.contains("array<any>"));
+        assert!(!rendered.contains("projects-v2"));
+        assert_eq!(rendered.matches("array<").count(), MAX_WALK_DEPTH);
     }
 }
