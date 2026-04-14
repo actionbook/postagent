@@ -120,6 +120,11 @@ struct ActionDetail {
     request_body: Option<RequestBody>,
     responses: Vec<ResponseInfo>,
     authentication: Option<Authentication>,
+    // Server returns only the $ref types this action transitively depends on,
+    // keyed by schema name (e.g. `Parent`). Schemas reference each other by
+    // ref name in the TYPE column; this section defines them.
+    #[serde(default)]
+    ref_types: Option<serde_json::Value>,
 }
 
 pub fn run(
@@ -563,6 +568,47 @@ fn describe_top_type_with_depth(schema: &serde_json::Value, walk_depth: usize) -
     t
 }
 
+// Renders the `ref_types` map the server sends — each entry becomes a named
+// block containing either a field table (for object-like schemas) or a
+// `Type: <t>` + description fallback (for scalars/enums). Names are sorted
+// alphabetically for stable output. Returns `None` when nothing renderable.
+fn format_ref_types(ref_types: &serde_json::Value) -> Option<String> {
+    let obj = ref_types.as_object()?;
+    if obj.is_empty() {
+        return None;
+    }
+
+    let mut names: Vec<&String> = obj.keys().collect();
+    names.sort();
+
+    let mut out = String::new();
+    let mut first = true;
+    for name in names {
+        let schema = &obj[name];
+        if !first {
+            out.push('\n');
+        }
+        first = false;
+
+        out.push_str(&format!("  ### {}\n\n", name));
+
+        if let Some(table) = format_schema_table(schema, REQUEST_SCHEMA_DEPTH) {
+            out.push_str(&table);
+            continue;
+        }
+
+        // Scalar / enum / bare $ref — fall back to type + description + constraints.
+        let type_str = extract_type(schema);
+        out.push_str(&format!("  Type: {}\n", type_str));
+        let desc = compose_description(schema);
+        if !desc.is_empty() {
+            out.push_str(&format!("  {}\n", desc));
+        }
+    }
+
+    Some(out)
+}
+
 fn extract_type(schema: &serde_json::Value) -> String {
     if let Some(t) = schema.get("type").and_then(|v| v.as_str()) {
         return t.to_string();
@@ -757,6 +803,15 @@ fn format_action_detail(data: &ActionDetail) -> String {
                     }
                 }
             }
+        }
+    }
+
+    // Referenced types — dedicated section so the TYPE column above can stay
+    // compact (just the ref name) while agents still see the full shape.
+    if let Some(ref ref_types) = data.ref_types {
+        if let Some(section) = format_ref_types(ref_types) {
+            output.push_str("\n  ## Types\n\n");
+            output.push_str(&section);
         }
     }
 
@@ -1141,6 +1196,124 @@ mod tests {
             ]
         });
         assert!(format_schema_table(&schema, REQUEST_SCHEMA_DEPTH).is_none());
+    }
+
+    #[test]
+    fn format_action_detail_renders_ref_types_section() {
+        // Server sends an already-pruned `ref_types` map. TYPE column in the
+        // Request Body table stays as the ref name (`Parent`), and the ### block
+        // in Types defines it. Also covers transitive refs: Parent -> PageId.
+        let data: ActionDetail = serde_json::from_value(json!({
+            "site": "notion",
+            "group": "pages",
+            "action": "create_page",
+            "method": "POST",
+            "path": "/v1/pages",
+            "base_url": "https://api.notion.com",
+            "description": "Creates a new page.",
+            "parameters": [],
+            "requestBody": {
+                "contentType": "application/json",
+                "schema": {
+                    "type": "object",
+                    "required": ["parent"],
+                    "properties": {
+                        "parent": { "$ref": "#/components/schemas/Parent" }
+                    }
+                }
+            },
+            "responses": [{ "status": "200", "description": "OK", "schema": {} }],
+            "authentication": null,
+            "ref_types": {
+                "Parent": {
+                    "type": "object",
+                    "required": ["type"],
+                    "properties": {
+                        "type":    { "type": "string", "enum": ["page_id", "database_id"], "description": "Parent kind." },
+                        "page_id": { "$ref": "#/components/schemas/PageId" }
+                    }
+                },
+                "PageId": {
+                    "type": "string",
+                    "description": "A Notion page ID."
+                }
+            }
+        }))
+        .unwrap();
+
+        let output = format_action_detail(&data);
+
+        // TYPE column keeps the ref name, not an expanded object.
+        let body_header = output.find("## Request Body").unwrap();
+        let types_header = output.find("## Types").unwrap();
+        assert!(body_header < types_header, "Types section must come after Request Body");
+        let body_section = &output[body_header..types_header];
+        assert!(body_section.contains("parent"));
+        assert!(body_section.contains("Parent"), "TYPE column should show the ref name");
+
+        // Types section defines each referenced type, sorted alphabetically.
+        let types_section = &output[types_header..];
+        assert!(types_section.contains("### PageId"));
+        assert!(types_section.contains("### Parent"));
+        let page_id_pos = types_section.find("### PageId").unwrap();
+        let parent_pos = types_section.find("### Parent").unwrap();
+        assert!(page_id_pos < parent_pos, "types sorted alphabetically");
+
+        // Parent's field table: nested ref (PageId) stays as a ref name.
+        assert!(types_section.contains("type"));
+        assert!(types_section.contains("page_id"));
+        assert!(types_section.contains("PageId"));
+        assert!(types_section.contains("[enum: page_id|database_id]"));
+
+        // PageId is a scalar — fallback to `Type:` + description.
+        let page_id_block = &types_section[page_id_pos..parent_pos];
+        assert!(page_id_block.contains("Type: string"));
+        assert!(page_id_block.contains("A Notion page ID."));
+    }
+
+    #[test]
+    fn format_action_detail_omits_types_section_when_missing() {
+        // No ref_types field — must not emit an empty `## Types` heading.
+        let data: ActionDetail = serde_json::from_value(json!({
+            "site": "demo",
+            "group": "g",
+            "action": "a",
+            "method": "GET",
+            "path": "/x",
+            "base_url": "https://example.com",
+            "description": "",
+            "parameters": [],
+            "requestBody": null,
+            "responses": [],
+            "authentication": null
+        }))
+        .unwrap();
+
+        let output = format_action_detail(&data);
+        assert!(!output.contains("## Types"));
+    }
+
+    #[test]
+    fn format_action_detail_omits_types_section_when_empty() {
+        // Server sent `ref_types: {}` (nothing collected) — same behavior.
+        let data: ActionDetail = serde_json::from_value(json!({
+            "site": "demo",
+            "group": "g",
+            "action": "a",
+            "method": "GET",
+            "path": "/x",
+            "base_url": "https://example.com",
+            "description": "",
+            "parameters": [],
+            "requestBody": null,
+            "responses": [],
+            "authentication": null,
+            "ref_types": {}
+        }))
+        .unwrap();
+
+        let output = format_action_detail(&data);
+        assert!(!output.contains("## Types"));
     }
 
     #[test]
