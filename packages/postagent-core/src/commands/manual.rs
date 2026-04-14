@@ -153,7 +153,11 @@ pub fn run(
     let client = Client::new();
     let url = format!("{}/api/manual?{}", config::api_base(), query_string);
 
-    let response = match client.get(&url).send() {
+    let mut request = client.get(&url);
+    if let Some(api_key) = super::config::resolve_api_key() {
+        request = request.header("x-api-key", api_key);
+    }
+    let response = match request.send() {
         Ok(resp) => resp,
         Err(_) => {
             eprintln!("Failed to connect to postagent server.");

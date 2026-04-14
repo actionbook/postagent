@@ -28,7 +28,25 @@ pub fn get_value(key: &str) -> Option<String> {
     load_config(&path).get(key).cloned()
 }
 
-fn save_config(path: &Path, config: &BTreeMap<String, String>) -> Result<(), Box<dyn std::error::Error>> {
+fn non_empty(value: Option<String>) -> Option<String> {
+    value.filter(|s| !s.is_empty())
+}
+
+fn resolve_api_key_from(
+    env_api_key: Option<String>,
+    config_api_key: Option<String>,
+) -> Option<String> {
+    non_empty(env_api_key).or_else(|| non_empty(config_api_key))
+}
+
+pub fn resolve_api_key() -> Option<String> {
+    resolve_api_key_from(std::env::var("POSTAGENT_API_KEY").ok(), get_value("apiKey"))
+}
+
+fn save_config(
+    path: &Path,
+    config: &BTreeMap<String, String>,
+) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir)?;
     }
@@ -44,7 +62,11 @@ fn save_config(path: &Path, config: &BTreeMap<String, String>) -> Result<(), Box
     Ok(())
 }
 
-pub fn run(action: &str, key: Option<&str>, value: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+pub fn run(
+    action: &str,
+    key: Option<&str>,
+    value: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
     match action {
         "set" => {
             let key = key.ok_or("Usage: postagent config set <KEY> <VALUE>")?;
@@ -131,5 +153,24 @@ mod tests {
 
         let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn resolve_api_key_prefers_non_empty_env_value() {
+        let resolved =
+            resolve_api_key_from(Some("env-key".to_string()), Some("config-key".to_string()));
+        assert_eq!(resolved.as_deref(), Some("env-key"));
+    }
+
+    #[test]
+    fn resolve_api_key_falls_back_when_env_is_empty() {
+        let resolved = resolve_api_key_from(Some(String::new()), Some("config-key".to_string()));
+        assert_eq!(resolved.as_deref(), Some("config-key"));
+    }
+
+    #[test]
+    fn resolve_api_key_treats_blank_config_as_missing() {
+        let resolved = resolve_api_key_from(None, Some(String::new()));
+        assert_eq!(resolved, None);
     }
 }

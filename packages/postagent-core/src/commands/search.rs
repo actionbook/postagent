@@ -43,7 +43,11 @@ pub fn run(query: &str, json: bool) -> Result<(), Box<dyn std::error::Error>> {
     let client = Client::new();
     let url = format!("{}/api/search?q={}", config::api_base(), urlencoding(query));
 
-    let response = match client.get(&url).send() {
+    let mut request = client.get(&url);
+    if let Some(api_key) = super::config::resolve_api_key() {
+        request = request.header("x-api-key", api_key);
+    }
+    let response = match request.send() {
         Ok(resp) => resp,
         Err(_) => {
             eprintln!("Failed to connect to postagent server.");
