@@ -441,60 +441,62 @@ fn walk_schema(
     schema: &serde_json::Value,
     depth_budget: usize,
 ) {
-    // Multi-variant schemas (oneOf/anyOf) — render only the first variant for
-    // now. This keeps output compact and avoids fabricating variant labels;
-    // full union rendering is a future concern once normalization lands.
+    // Step 1: emit sibling `properties` first so base fields (often required
+    // and shared across all variants) come before any variant-specific ones.
+    if let Some(props_obj) = schema.get("properties").and_then(|v| v.as_object()) {
+        let required_fields: std::collections::HashSet<String> = schema
+            .get("required")
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .unwrap_or_default();
+
+        for (field_name, field_schema) in props_obj {
+            let path = if prefix.is_empty() {
+                field_name.clone()
+            } else {
+                format!("{}.{}", prefix, field_name)
+            };
+            let type_str = extract_type(field_schema);
+            let is_req = required_fields.contains(field_name);
+            let desc = compose_description(field_schema);
+
+            rows.push(vec![
+                path.clone(),
+                type_str.clone(),
+                if is_req { "yes".into() } else { "no".into() },
+                desc,
+            ]);
+
+            if depth_budget == 0 {
+                continue;
+            }
+
+            // Recurse: object properties, oneOf/anyOf variants, or array item schemas.
+            if field_schema.get("properties").is_some()
+                || field_schema.get("oneOf").is_some()
+                || field_schema.get("anyOf").is_some()
+            {
+                walk_schema(rows, &path, field_schema, depth_budget - 1);
+            } else if type_str == "array" {
+                if let Some(items) = field_schema.get("items") {
+                    let items_prefix = format!("{}[]", path);
+                    walk_schema(rows, &items_prefix, items, depth_budget - 1);
+                }
+            }
+        }
+    }
+
+    // Step 2: walk the first variant of any oneOf/anyOf at this node. Variants
+    // compose with sibling `properties` in JSON Schema (base + variant pattern),
+    // so we must visit both — not return early after the union branch. Render
+    // only the first variant for now; full union rendering is deferred until
+    // schema normalization lands.
     for key in ["oneOf", "anyOf"] {
         if let Some(variants) = schema.get(key).and_then(|v| v.as_array()) {
             if let Some(first) = variants.first() {
                 walk_schema(rows, prefix, first, depth_budget);
             }
-            return;
-        }
-    }
-
-    let Some(props_obj) = schema.get("properties").and_then(|v| v.as_object()) else {
-        return;
-    };
-
-    let required_fields: std::collections::HashSet<String> = schema
-        .get("required")
-        .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-        .unwrap_or_default();
-
-    for (field_name, field_schema) in props_obj {
-        let path = if prefix.is_empty() {
-            field_name.clone()
-        } else {
-            format!("{}.{}", prefix, field_name)
-        };
-        let type_str = extract_type(field_schema);
-        let is_req = required_fields.contains(field_name);
-        let desc = compose_description(field_schema);
-
-        rows.push(vec![
-            path.clone(),
-            type_str.clone(),
-            if is_req { "yes".into() } else { "no".into() },
-            desc,
-        ]);
-
-        if depth_budget == 0 {
-            continue;
-        }
-
-        // Recurse: object properties, oneOf/anyOf variants, or array item schemas.
-        if field_schema.get("properties").is_some()
-            || field_schema.get("oneOf").is_some()
-            || field_schema.get("anyOf").is_some()
-        {
-            walk_schema(rows, &path, field_schema, depth_budget - 1);
-        } else if type_str == "array" {
-            if let Some(items) = field_schema.get("items") {
-                let items_prefix = format!("{}[]", path);
-                walk_schema(rows, &items_prefix, items, depth_budget - 1);
-            }
+            break;
         }
     }
 }
@@ -1000,6 +1002,40 @@ mod tests {
         assert!(output.contains("page_id"));
         assert!(output.contains("string"));
         assert!(output.contains("yes"));
+    }
+
+    #[test]
+    fn walk_schema_preserves_base_properties_with_oneof() {
+        // Regression for codex-bot review on PR #5: a schema with sibling
+        // `properties` next to a `oneOf` used to skip the base properties
+        // entirely after recursing into the first variant.
+        let schema = json!({
+            "type": "object",
+            "required": ["common"],
+            "properties": {
+                "common": { "type": "string", "description": "Always present" },
+                "id":     { "type": "string", "description": "Stable id" }
+            },
+            "oneOf": [
+                {
+                    "properties": {
+                        "variantField": { "type": "number", "description": "Variant-specific" }
+                    }
+                }
+            ]
+        });
+        let table = format_schema_table(&schema, REQUEST_SCHEMA_DEPTH).expect("table");
+        assert!(table.contains("common"), "base property `common` must appear");
+        assert!(table.contains("Always present"));
+        assert!(table.contains("id"), "base property `id` must appear");
+        assert!(table.contains("variantField"), "variant field must appear");
+        assert!(table.contains("Variant-specific"));
+
+        // Base properties should be rendered before variant fields so the
+        // shared/required parts read first.
+        let common_pos = table.find("common").unwrap();
+        let variant_pos = table.find("variantField").unwrap();
+        assert!(common_pos < variant_pos, "base props must precede variant fields");
     }
 
     #[test]
