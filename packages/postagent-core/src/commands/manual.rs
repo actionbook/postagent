@@ -538,6 +538,19 @@ fn format_schema_table(schema: &serde_json::Value, depth_budget: usize) -> Optio
     Some(out)
 }
 
+// Renders a top-level schema as a single-line type label. Used when
+// `format_schema_table` produces no rows (e.g. a response that's a bare $ref,
+// or `array<$ref>`) so we still surface *something* about the shape.
+fn describe_top_type(schema: &serde_json::Value) -> String {
+    let t = extract_type(schema);
+    if t == "array" {
+        if let Some(items) = schema.get("items") {
+            return format!("array<{}>", describe_top_type(items));
+        }
+    }
+    t
+}
+
 fn extract_type(schema: &serde_json::Value) -> String {
     if let Some(t) = schema.get("type").and_then(|v| v.as_str()) {
         return t.to_string();
@@ -718,11 +731,18 @@ fn format_action_detail(data: &ActionDetail) -> String {
         for r in &data.responses {
             output.push_str(&format!("\n  **{}** — {}\n", r.status, r.description));
 
-            // Render response schema fields if available
+            // Render response schema fields if available; fall back to a
+            // one-line type label when the schema produces no rows (e.g.
+            // a bare $ref or `array<$ref>` with nothing to walk into).
             if let Some(ref schema) = r.schema {
                 if let Some(table) = format_schema_table(schema, RESPONSE_SCHEMA_DEPTH) {
                     output.push('\n');
                     output.push_str(&table);
+                } else {
+                    let type_label = describe_top_type(schema);
+                    if type_label != "any" {
+                        output.push_str(&format!("\n  Type: {}\n", type_label));
+                    }
                 }
             }
         }
@@ -1147,5 +1167,46 @@ mod tests {
         assert!(output.contains("Type: string"));
         assert!(output.contains("The raw body content to send."));
         assert!(!output.contains("FIELD"));
+    }
+
+    #[test]
+    fn format_action_detail_falls_back_for_array_of_ref_response() {
+        // Regression: a response schema like `array<$ref>` produces no table
+        // rows (no top-level `properties`/`oneOf`, and walk_schema only
+        // recurses into array items from inside a property). Without a
+        // fallback the user saw just the status line and no shape info.
+        let data: ActionDetail = serde_json::from_value(json!({
+            "site": "github",
+            "group": "projects",
+            "action": "list",
+            "method": "GET",
+            "path": "/orgs/{org}/projectsV2",
+            "base_url": "https://api.github.com",
+            "description": "List org projects.",
+            "parameters": [],
+            "responses": [
+                {
+                    "status": "200",
+                    "description": "Response",
+                    "schema": {
+                        "type": "array",
+                        "items": { "$ref": "#/components/schemas/projects-v2" }
+                    }
+                },
+                {
+                    "status": "204",
+                    "description": "No content",
+                    "schema": { "$ref": "#/components/schemas/projects-v2" }
+                }
+            ],
+            "authentication": null
+        }))
+        .unwrap();
+
+        let output = format_action_detail(&data);
+        assert!(output.contains("**200**"));
+        assert!(output.contains("Type: array<projects-v2>"));
+        assert!(output.contains("**204**"));
+        assert!(output.contains("Type: projects-v2"));
     }
 }
