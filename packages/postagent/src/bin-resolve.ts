@@ -39,11 +39,6 @@ export function resolveBinary(): string {
     }
   }
 
-  // Allow env var override
-  if (process.env.POSTAGENT_BINARY_PATH) {
-    return process.env.POSTAGENT_BINARY_PATH;
-  }
-
   const platformKey = `${process.platform}-${process.arch}`;
   const packageName = PLATFORM_PACKAGES[platformKey];
 
