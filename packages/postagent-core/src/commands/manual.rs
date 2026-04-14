@@ -434,13 +434,23 @@ const REQUEST_SCHEMA_DEPTH: usize = 5;
 // Responses are consumed, not composed — top-level fields sketch the shape
 // cheaply; deep structure belongs in --format json for anyone who needs it.
 const RESPONSE_SCHEMA_DEPTH: usize = 0;
+// Hard cap on total recursion frames (independent of `depth_budget`, which
+// counts only object-nesting levels). Guards against pathological schemas
+// such as `oneOf -> oneOf -> oneOf -> …` chains where each step doesn't
+// consume the nesting budget but still grows the stack.
+const MAX_WALK_DEPTH: usize = 32;
 
 fn walk_schema(
     rows: &mut Vec<Vec<String>>,
     prefix: &str,
     schema: &serde_json::Value,
     depth_budget: usize,
+    walk_depth: usize,
 ) {
+    if walk_depth >= MAX_WALK_DEPTH {
+        return;
+    }
+
     // Step 1: emit sibling `properties` first so base fields (often required
     // and shared across all variants) come before any variant-specific ones.
     if let Some(props_obj) = schema.get("properties").and_then(|v| v.as_object()) {
@@ -476,11 +486,11 @@ fn walk_schema(
                 || field_schema.get("oneOf").is_some()
                 || field_schema.get("anyOf").is_some()
             {
-                walk_schema(rows, &path, field_schema, depth_budget - 1);
+                walk_schema(rows, &path, field_schema, depth_budget - 1, walk_depth + 1);
             } else if type_str == "array" {
                 if let Some(items) = field_schema.get("items") {
                     let items_prefix = format!("{}[]", path);
-                    walk_schema(rows, &items_prefix, items, depth_budget - 1);
+                    walk_schema(rows, &items_prefix, items, depth_budget - 1, walk_depth + 1);
                 }
             }
         }
@@ -488,13 +498,14 @@ fn walk_schema(
 
     // Step 2: walk the first variant of any oneOf/anyOf at this node. Variants
     // compose with sibling `properties` in JSON Schema (base + variant pattern),
-    // so we must visit both — not return early after the union branch. Render
-    // only the first variant for now; full union rendering is deferred until
-    // schema normalization lands.
+    // so we must visit both — not return early after the union branch. Union
+    // descent does not consume `depth_budget` (variants are alternatives at
+    // the same logical level), but `walk_depth` always increments so chained
+    // union wrappers cannot bypass MAX_WALK_DEPTH.
     for key in ["oneOf", "anyOf"] {
         if let Some(variants) = schema.get(key).and_then(|v| v.as_array()) {
             if let Some(first) = variants.first() {
-                walk_schema(rows, prefix, first, depth_budget);
+                walk_schema(rows, prefix, first, depth_budget, walk_depth + 1);
             }
             break;
         }
@@ -513,7 +524,7 @@ fn format_schema_table(schema: &serde_json::Value, depth_budget: usize) -> Optio
     ];
     let mut table_rows: Vec<Vec<String>> = vec![header];
 
-    walk_schema(&mut table_rows, "", schema, depth_budget);
+    walk_schema(&mut table_rows, "", schema, depth_budget, 0);
 
     if table_rows.len() == 1 {
         return None;
@@ -1036,6 +1047,27 @@ mod tests {
         let common_pos = table.find("common").unwrap();
         let variant_pos = table.find("variantField").unwrap();
         assert!(common_pos < variant_pos, "base props must precede variant fields");
+    }
+
+    #[test]
+    fn walk_schema_caps_pathological_union_chain() {
+        // Regression for codex-bot review on PR #5: a long oneOf chain bypassed
+        // depth_budget because union descent doesn't consume it. MAX_WALK_DEPTH
+        // is the absolute guard that prevents stack/runtime blowups on
+        // pathological specs. Wrap a leaf object in 200 oneOf layers — must
+        // return without panicking or stack-overflowing.
+        let mut schema = json!({
+            "properties": { "leaf": { "type": "string", "description": "innermost" } }
+        });
+        for _ in 0..200 {
+            schema = json!({ "oneOf": [schema] });
+        }
+        // The outer layers exceed MAX_WALK_DEPTH so the leaf is unreachable —
+        // the test's purpose is just to confirm the call terminates safely.
+        let result = format_schema_table(&schema, REQUEST_SCHEMA_DEPTH);
+        // Either None (no rows) or Some(table); both are acceptable. The
+        // important thing is we got here without panicking.
+        let _ = result;
     }
 
     #[test]
