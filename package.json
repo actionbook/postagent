@@ -5,6 +5,11 @@
     "build": "pnpm -r build",
     "build:core": "cd packages/postagent-core && cargo build --release",
     "dev": "pnpm --filter postagent dev",
-    "dev:watch": "cd packages/postagent-core && cargo watch -x build"
+    "dev:watch": "cd packages/postagent-core && cargo watch -x build",
+    "changeset": "changeset",
+    "version-packages": "changeset version && node scripts/sync-versions.mjs && pnpm install --lockfile-only"
+  },
+  "devDependencies": {
+    "@changesets/cli": "^2.27.10"
   }
 }
