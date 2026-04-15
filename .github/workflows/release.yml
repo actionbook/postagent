@@ -1,0 +1,115 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Create Release PR or tag release
+        id: changesets
+        uses: changesets/action@v1
+        with:
+          version: pnpm version-packages
+          commit: "chore(release): version packages"
+          title: "chore(release): version packages"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Read released version
+        if: steps.changesets.outputs.hasChangesets == 'false'
+        id: version
+        run: |
+          VERSION=$(node -p "require('./packages/postagent/package.json').version")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Ensure release tag exists
+        if: steps.changesets.outputs.hasChangesets == 'false'
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          # Make sure we know about tags on the remote.
+          git fetch origin "refs/tags/$TAG:refs/tags/$TAG" 2>/dev/null || true
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            echo "Tag $TAG already exists, reusing it."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "Release $TAG"
+          git push origin "$TAG"
+          echo "Created and pushed tag $TAG."
+
+      - name: Dispatch publish workflow if no prior run exists
+        if: steps.changesets.outputs.hasChangesets == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          # GITHUB_TOKEN-pushed tags do NOT cascade into the tag-based publish
+          # workflow, so we dispatch publish.yml explicitly. The tag's mere
+          # existence is NOT a safe proxy for "publish already happened":
+          # a prior run could have pushed the tag but failed to dispatch.
+          #
+          # Do NOT auto-redispatch a failed publish.yml run. npm publish is
+          # non-idempotent here, so a partial publish can leave some packages
+          # released and any subsequent retry would fail on "version already
+          # exists", permanently wedging the release.
+          LATEST=$(gh run list \
+            --workflow=publish.yml \
+            --limit=50 \
+            --json headBranch,status,conclusion,databaseId,url \
+            --jq "[.[] | select(.headBranch == \"$TAG\")] | .[0]")
+
+          if [ -n "$LATEST" ] && [ "$LATEST" != "null" ]; then
+            STATUS=$(echo "$LATEST" | jq -r '.status')
+            CONCLUSION=$(echo "$LATEST" | jq -r '.conclusion // ""')
+            URL=$(echo "$LATEST" | jq -r '.url')
+            if [ "$STATUS" != "completed" ]; then
+              echo "publish.yml is currently $STATUS for $TAG ($URL) — not dispatching again."
+              exit 0
+            fi
+            if [ "$CONCLUSION" = "success" ]; then
+              echo "publish.yml already succeeded for $TAG ($URL) — nothing to do."
+              exit 0
+            fi
+            echo "publish.yml previously ended as $CONCLUSION for $TAG ($URL) — not redispatching automatically."
+            echo "Manual recovery is required because npm publish is not idempotent."
+            exit 0
+          else
+            echo "No prior publish.yml run found for $TAG — dispatching."
+          fi
+
+          gh workflow run publish.yml --ref "$TAG"
+          echo "Dispatched publish.yml for $TAG."
