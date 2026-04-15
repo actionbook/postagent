@@ -1,5 +1,11 @@
 # postagent
 
+## 0.2.3
+
+### Patch Changes
+
+- [#13](https://github.com/actionbook/postagent/pull/13) [`c41a12d`](https://github.com/actionbook/postagent/commit/c41a12d137a6fbec6d0d1fe29d5b0c5d9718d3ee) Thanks [@4bmis](https://github.com/4bmis)! - fix: manual will render ref types correctly in detail of actions
+
 ## 0.2.2
 
 ### Patch Changes
