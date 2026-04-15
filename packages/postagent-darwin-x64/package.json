@@ -1,13 +1,19 @@
 {
   "name": "postagent-darwin-x64",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Postagent CLI native binary for macOS x64",
-  "os": ["darwin"],
-  "cpu": ["x64"],
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "x64"
+  ],
   "bin": {
     "postagent-core": "bin/postagent-core"
   },
-  "files": ["bin/postagent-core"],
+  "files": [
+    "bin/postagent-core"
+  ],
   "license": "MIT",
   "repository": {
     "type": "git",

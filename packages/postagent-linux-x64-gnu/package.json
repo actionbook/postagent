@@ -1,13 +1,19 @@
 {
   "name": "postagent-linux-x64-gnu",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Postagent CLI native binary for Linux x64 (glibc)",
-  "os": ["linux"],
-  "cpu": ["x64"],
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "x64"
+  ],
   "bin": {
     "postagent-core": "bin/postagent-core"
   },
-  "files": ["bin/postagent-core"],
+  "files": [
+    "bin/postagent-core"
+  ],
   "license": "MIT",
   "repository": {
     "type": "git",
