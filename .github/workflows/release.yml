@@ -1,3 +1,13 @@
+# Release: version bump orchestrator. Runs on every push to main.
+#
+# If there are unconsumed changesets, opens/updates a "version packages" PR
+# that bumps package.json versions, writes CHANGELOG entries, and syncs
+# Cargo.toml/Cargo.lock via scripts/sync-versions.mjs.
+#
+# When that PR is merged (no changesets left), this workflow instead tags
+# vX.Y.Z and dispatches publish.yml. Does not build or publish anything
+# itself — see publish.yml for the actual npm release.
+
 name: Release
 
 on:

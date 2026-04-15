@@ -10,6 +10,7 @@
     "version-packages": "changeset version && node scripts/sync-versions.mjs && pnpm install --lockfile-only"
   },
   "devDependencies": {
+    "@changesets/changelog-github": "^0.6.0",
     "@changesets/cli": "^2.27.10"
   }
 }
