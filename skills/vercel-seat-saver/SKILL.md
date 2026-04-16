@@ -39,7 +39,7 @@ Before starting, ensure locally:
 
 1. `postagent` is installed — `npm i -g postagent@latest`
 2. `postagent auth vercel` — Vercel API token is saved. To obtain a token: Vercel Dashboard > click avatar > Settings > Tokens. Collect the token through a secure input path — do not ask the user to paste it into normal chat.
-3. `postagent auth github` — GitHub personal access token is saved (needs `repo` scope)
+3. `postagent auth github` — GitHub personal access token is saved. To obtain a token: GitHub > click avatar > Settings > Developer settings > Personal access tokens > Tokens (classic) > Generate new token (classic). Select the `repo` scope.
 
 If auth is missing, guide the user through `postagent auth` first.
 
