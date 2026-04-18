@@ -1,10 +1,10 @@
-use crate::token::resolve_template_variables;
+use crate::token::{referenced_sites, resolve_template_variables};
 use reqwest::blocking::Client;
 use std::collections::HashMap;
 use std::time::Duration;
 
 fn contains_token_template(s: &str) -> bool {
-    regex::Regex::new(r"\$POSTAGENT\.[A-Za-z0-9_]+\.API_KEY")
+    regex::Regex::new(r"\$POSTAGENT\.[A-Za-z0-9_]+\.[A-Z_]+")
         .unwrap()
         .is_match(s)
 }
@@ -15,17 +15,21 @@ pub fn run(
     headers: &[String],
     data: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // 0. Check for token template
     let has_token = contains_token_template(raw_url)
         || headers.iter().any(|h| contains_token_template(h))
-        || data.map_or(false, |d| contains_token_template(d));
+        || data.is_some_and(contains_token_template);
     if !has_token {
-        eprintln!("Missing $POSTAGENT.<SITE>.API_KEY in headers or body.\n");
-        eprintln!("Example: -H 'Authorization: Bearer $POSTAGENT.GITHUB.API_KEY'");
+        eprintln!("Missing $POSTAGENT.<SITE>.TOKEN (or API_KEY) in headers or body.\n");
+        eprintln!("Example: -H 'Authorization: Bearer $POSTAGENT.GITHUB.TOKEN'");
         std::process::exit(1);
     }
 
-    // 1. Template variable substitution
+    // Capture the pre-resolution inputs so we can still report which sites
+    // were referenced after substitution replaces the templates with tokens.
+    let headers_joined: Vec<String> = headers.to_vec();
+    let body_snap = data.unwrap_or("").to_string();
+    let url_snap = raw_url.to_string();
+
     let url = match resolve_template_variables(raw_url) {
         Ok(u) => u,
         Err(e) => {
@@ -59,7 +63,6 @@ pub fn run(
         None => None,
     };
 
-    // 2. Determine method
     let http_method = if let Some(m) = method {
         m.to_uppercase()
     } else if body.is_some() {
@@ -68,7 +71,6 @@ pub fn run(
         "GET".to_string()
     };
 
-    // 3. Default User-Agent (user-supplied header takes precedence)
     let ua_key = "User-Agent";
     if !merged_headers.keys().any(|k| k.eq_ignore_ascii_case(ua_key)) {
         merged_headers.insert(
@@ -77,14 +79,12 @@ pub fn run(
         );
     }
 
-    // 3.5. Inject x-api-key: env POSTAGENT_API_KEY > config apiKey
     if let Ok(api_key) = std::env::var("POSTAGENT_API_KEY") {
         merged_headers.insert("x-api-key".to_string(), api_key);
     } else if let Some(api_key) = super::config::get_value("apiKey") {
         merged_headers.insert("x-api-key".to_string(), api_key);
     }
 
-    // 4. Send request
     let client = Client::builder()
         .timeout(Duration::from_secs(30))
         .build()?;
@@ -119,20 +119,52 @@ pub fn run(
         }
     };
 
-    // 5. Handle response
     let status = response.status();
     let status_text = status.canonical_reason().unwrap_or("").to_string();
+    let response_url_host = extract_host(&url);
     let response_body = response.text()?;
 
     if status.is_success() || status.is_informational() || status.is_redirection() {
         print!("{}", response_body);
     } else {
-        eprint!("HTTP {} {}\n", status.as_u16(), status_text);
+        eprintln!("HTTP {} {}", status.as_u16(), status_text);
         eprint!("{}", response_body);
+
+        if status.as_u16() == 401 || status.as_u16() == 403 {
+            eprintln!();
+            let header_refs: Vec<&str> = headers_joined.iter().map(|s| s.as_str()).collect();
+            let mut inputs: Vec<&str> = vec![url_snap.as_str(), body_snap.as_str()];
+            inputs.extend(header_refs);
+            let sites = referenced_sites(&inputs);
+            eprintln!("HTTP {} from {}", status.as_u16(), response_url_host);
+            if sites.is_empty() {
+                eprintln!("Your access token may be expired. Run: postagent auth <site>");
+            } else if sites.len() == 1 {
+                eprintln!(
+                    "Your access token may be expired. Run: postagent auth {}",
+                    sites[0]
+                );
+            } else {
+                eprintln!(
+                    "Your access token may be expired. Run: postagent auth <site> for one of: {}",
+                    sites.join(", ")
+                );
+            }
+        }
         std::process::exit(1);
     }
 
     Ok(())
+}
+
+fn extract_host(url: &str) -> String {
+    // Strip scheme, then take up to the first slash or port colon.
+    let without_scheme = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
+    let host = without_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or(without_scheme);
+    host.split(':').next().unwrap_or(host).to_string()
 }
 
 fn parse_header(raw: &str) -> HashMap<String, String> {
@@ -202,7 +234,6 @@ mod tests {
 
     #[test]
     fn parse_header_key_value_with_colon_in_value() {
-        // Value contains colon (e.g., "Bearer abc:def"), only the first colon is the delimiter
         let input = "Authorization: Bearer abc:def";
         let result = parse_header(input);
         assert_eq!(result.len(), 1);
@@ -226,16 +257,13 @@ mod tests {
 
     #[test]
     fn parse_header_invalid_json_falls_back_to_key_value() {
-        // Starts with '{' but is not valid JSON
         let input = "{broken json";
         let result = parse_header(input);
-        // Falls through JSON parsing, then tries Key:Value — no colon after key, so empty
         assert!(result.is_empty());
     }
 
     #[test]
     fn parse_header_invalid_json_with_colon_fallback() {
-        // Starts with '{' but invalid JSON, but has a colon so Key:Value fallback works
         let input = "{broken: json}";
         let result = parse_header(input);
         assert_eq!(result.len(), 1);
@@ -244,7 +272,6 @@ mod tests {
 
     #[test]
     fn method_inference_defaults_to_get_without_body() {
-        // Test the method inference logic directly
         let method: Option<&str> = None;
         let body: Option<&str> = None;
         let http_method = if let Some(m) = method {
@@ -297,5 +324,21 @@ mod tests {
             "GET".to_string()
         };
         assert_eq!(http_method, "DELETE");
+    }
+
+    #[test]
+    fn extract_host_basic() {
+        assert_eq!(extract_host("https://api.notion.com/v1/pages"), "api.notion.com");
+        assert_eq!(extract_host("http://localhost:8080/x"), "localhost");
+        assert_eq!(extract_host("https://api.example.com"), "api.example.com");
+    }
+
+    #[test]
+    fn contains_token_template_recognizes_new_forms() {
+        assert!(contains_token_template("$POSTAGENT.FOO.TOKEN"));
+        assert!(contains_token_template("$POSTAGENT.FOO.ACCESS_TOKEN"));
+        assert!(contains_token_template("$POSTAGENT.FOO.API_KEY"));
+        assert!(contains_token_template("$POSTAGENT.FOO.EXTRAS"));
+        assert!(!contains_token_template("no templates here"));
     }
 }

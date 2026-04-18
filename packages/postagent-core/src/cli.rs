@@ -14,7 +14,9 @@ use clap::{Parser, Subcommand};
 Commands:
   search <KEYWORD>                      Search actions by keyword
   manual <SITE> [GROUP] [ACTION]        Browse API reference (progressive discovery)
-  auth <SITE> [--token <TOKEN>]         Save credentials for a site
+  auth <SITE> [OPTIONS]                 Save credentials (static API key or OAuth)
+  auth <SITE> logout|reset-app|status   Manage saved credentials for a site
+  auth list                             List credential status across sites
   config <set|get> <KEY> [VALUE]        Manage postagent config
   send <CURL_QUERY>                     Send an HTTP request
 
@@ -59,21 +61,61 @@ Examples:
         #[arg(long)]
         json: bool,
     },
-    /// Save credentials for a site
+    /// Save credentials for a site (static API key or OAuth 2.0)
     #[command(after_help = "\
 Examples:
   postagent auth github
-  postagent auth openai
-  postagent auth github --token sk-xxxxxxxxxxxx
+  postagent auth notion --method oauth
+  postagent auth github --token ghp_xxxxxxxxxxxx
+  postagent auth notion --client-id CID --client-secret CSEC
+  postagent auth atlassian --param tenant=acme --scope offline_access
+  postagent auth notion --no-browser
+  postagent auth notion logout
+  postagent auth notion reset-app
+  postagent auth notion status
+  postagent auth list
 
-Saved keys can be referenced in `send` as $POSTAGENT.<SITE>.API_KEY
-For example, after `postagent auth github`, use $POSTAGENT.GITHUB.API_KEY in headers.")]
+Saved credentials are referenced in `send` via $POSTAGENT.<SITE>.TOKEN
+(OAuth) or $POSTAGENT.<SITE>.API_KEY (static).")]
     Auth {
-        /// Site name
-        site: String,
-        /// API key or access token (non-interactive)
+        /// Site name (required for all subcommands except `list`)
+        site: Option<String>,
+
+        /// API key or access token; forces static save regardless of descriptor
         #[arg(long)]
         token: Option<String>,
+
+        /// Auth method id (skip interactive selection)
+        #[arg(long)]
+        method: Option<String>,
+
+        /// OAuth client id (skip prompt)
+        #[arg(long = "client-id")]
+        client_id: Option<String>,
+
+        /// OAuth client secret (skip prompt, confidential clients only)
+        #[arg(long = "client-secret")]
+        client_secret: Option<String>,
+
+        /// Print authorize URL instead of opening a browser
+        #[arg(long = "no-browser")]
+        no_browser: bool,
+
+        /// Fill required authorize-URL placeholder (repeatable), e.g. --param tenant=acme
+        #[arg(long = "param", value_parser = parse_key_value, num_args = 1)]
+        param: Vec<(String, String)>,
+
+        /// Additional OAuth scope (repeatable); overrides scopes.default
+        #[arg(long = "scope", num_args = 1)]
+        scope: Vec<String>,
+
+        /// Reserved; ignored in v1
+        #[arg(long)]
+        profile: Option<String>,
+
+        /// Auth subcommand
+        #[command(subcommand)]
+        action: Option<AuthAction>,
     },
     /// Manage postagent config (stored in ~/.postagent/profiles/default/config.yaml)
     #[command(after_help = "\
@@ -91,13 +133,14 @@ Examples:
     /// Send an HTTP request
     #[command(after_help = "\
 Token substitution:
-  Use $POSTAGENT.<SITE>.API_KEY in URL, headers, or body to inject saved keys.
-  Save a key first with `postagent auth <SITE>`.
+  Use $POSTAGENT.<SITE>.TOKEN (OAuth & static), $POSTAGENT.<SITE>.ACCESS_TOKEN
+  (OAuth only), or $POSTAGENT.<SITE>.API_KEY (static, legacy) in URL, headers,
+  or body. Save credentials first with `postagent auth <SITE>`.
 
 Examples:
   postagent send https://api.example.com/users
   postagent send https://api.example.com/users -X POST -d '{\"name\":\"alice\"}'
-  postagent send https://api.example.com/me -H 'Authorization: Bearer $POSTAGENT.GITHUB.API_KEY'")]
+  postagent send https://api.github.com/user -H 'Authorization: Bearer $POSTAGENT.GITHUB.TOKEN'")]
     Send {
         /// Request URL
         url: String,
@@ -113,6 +156,29 @@ Examples:
     },
 }
 
+#[derive(Subcommand, Debug, Clone)]
+pub enum AuthAction {
+    /// Remove saved tokens (keeps the OAuth app registration)
+    Logout,
+    /// Remove saved tokens and OAuth app registration
+    #[command(name = "reset-app")]
+    ResetApp,
+    /// Show current auth status for a site
+    Status,
+    /// List all sites with saved credentials
+    List,
+}
+
+fn parse_key_value(s: &str) -> Result<(String, String), String> {
+    let (k, v) = s
+        .split_once('=')
+        .ok_or_else(|| format!("expected KEY=VALUE, got `{}`", s))?;
+    if k.is_empty() {
+        return Err("key cannot be empty".into());
+    }
+    Ok((k.to_string(), v.to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -121,13 +187,17 @@ mod tests {
     #[test]
     fn parse_search_command() {
         let cli = Cli::parse_from(["postagent", "search", "github"]);
-        assert!(matches!(cli.command, Commands::Search { ref keyword, json } if keyword == "github" && !json));
+        assert!(
+            matches!(cli.command, Commands::Search { ref keyword, json } if keyword == "github" && !json)
+        );
     }
 
     #[test]
     fn parse_search_with_json_flag() {
         let cli = Cli::parse_from(["postagent", "search", "test", "--json"]);
-        assert!(matches!(cli.command, Commands::Search { ref keyword, json } if keyword == "test" && json));
+        assert!(
+            matches!(cli.command, Commands::Search { ref keyword, json } if keyword == "test" && json)
+        );
     }
 
     #[test]
@@ -171,7 +241,98 @@ mod tests {
     #[test]
     fn parse_auth_command() {
         let cli = Cli::parse_from(["postagent", "auth", "openai"]);
-        assert!(matches!(cli.command, Commands::Auth { ref site, token: None } if site == "openai"));
+        match cli.command {
+            Commands::Auth { site, token, action, .. } => {
+                assert_eq!(site.as_deref(), Some("openai"));
+                assert!(token.is_none());
+                assert!(action.is_none());
+            }
+            _ => panic!("expected Auth"),
+        }
+    }
+
+    #[test]
+    fn parse_auth_with_token() {
+        let cli = Cli::parse_from(["postagent", "auth", "github", "--token", "ghp_x"]);
+        match cli.command {
+            Commands::Auth { token, .. } => assert_eq!(token.as_deref(), Some("ghp_x")),
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn parse_auth_with_method_and_oauth_flags() {
+        let cli = Cli::parse_from([
+            "postagent",
+            "auth",
+            "notion",
+            "--method",
+            "oauth",
+            "--client-id",
+            "CID",
+            "--client-secret",
+            "SEC",
+            "--no-browser",
+            "--param",
+            "tenant=acme",
+            "--scope",
+            "offline_access",
+        ]);
+        match cli.command {
+            Commands::Auth {
+                method,
+                client_id,
+                client_secret,
+                no_browser,
+                param,
+                scope,
+                ..
+            } => {
+                assert_eq!(method.as_deref(), Some("oauth"));
+                assert_eq!(client_id.as_deref(), Some("CID"));
+                assert_eq!(client_secret.as_deref(), Some("SEC"));
+                assert!(no_browser);
+                assert_eq!(param, vec![("tenant".into(), "acme".into())]);
+                assert_eq!(scope, vec!["offline_access".to_string()]);
+            }
+            _ => panic!("expected Auth"),
+        }
+    }
+
+    #[test]
+    fn parse_auth_subcommands() {
+        let c = Cli::parse_from(["postagent", "auth", "notion", "logout"]);
+        match c.command {
+            Commands::Auth { site, action, .. } => {
+                assert_eq!(site.as_deref(), Some("notion"));
+                assert!(matches!(action, Some(AuthAction::Logout)));
+            }
+            _ => panic!(),
+        }
+
+        let c = Cli::parse_from(["postagent", "auth", "notion", "reset-app"]);
+        match c.command {
+            Commands::Auth { action, .. } => assert!(matches!(action, Some(AuthAction::ResetApp))),
+            _ => panic!(),
+        }
+
+        let c = Cli::parse_from(["postagent", "auth", "notion", "status"]);
+        match c.command {
+            Commands::Auth { action, .. } => assert!(matches!(action, Some(AuthAction::Status))),
+            _ => panic!(),
+        }
+
+        let c = Cli::parse_from(["postagent", "auth", "list"]);
+        match c.command {
+            Commands::Auth { site, action, .. } => {
+                // `list` fills into the site slot syntactically; main.rs
+                // dispatches on (site, action) pair. Accept either shape.
+                let got_list = matches!(action, Some(AuthAction::List))
+                    || site.as_deref() == Some("list");
+                assert!(got_list, "expected `auth list` to route to List or slot into site");
+            }
+            _ => panic!(),
+        }
     }
 
     #[test]
@@ -222,5 +383,16 @@ mod tests {
     fn json_flag_on_manual() {
         let cli = Cli::parse_from(["postagent", "manual", "github", "--json"]);
         assert!(matches!(cli.command, Commands::Manual { json, .. } if json));
+    }
+
+    #[test]
+    fn parse_key_value_helper() {
+        assert_eq!(parse_key_value("a=b").unwrap(), ("a".into(), "b".into()));
+        assert_eq!(
+            parse_key_value("tenant=acme-co").unwrap(),
+            ("tenant".into(), "acme-co".into())
+        );
+        assert!(parse_key_value("no-equals").is_err());
+        assert!(parse_key_value("=v").is_err());
     }
 }

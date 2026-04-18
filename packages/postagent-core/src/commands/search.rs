@@ -33,7 +33,9 @@ struct FlatRow {
     site: String,
     group: String,
     action: String,
+    #[allow(dead_code)]
     method: String,
+    #[allow(dead_code)]
     path: String,
     summary: String,
     score: f64,
@@ -167,6 +169,7 @@ fn format_search_results(sites: &[SearchSite], query: &str) -> String {
     let result_count = rows.len();
 
     // Group by site -> group, preserving score order
+    #[allow(clippy::type_complexity)]
     let mut sites: Vec<(String, Vec<(String, Vec<&FlatRow>)>)> = Vec::new();
     for r in &rows {
         let site_entry = sites.iter_mut().find(|(s, _)| s == &r.site);

@@ -15,6 +15,7 @@ struct Authentication {
     name: Option<String>,
     #[serde(rename = "type")]
     auth_type: String,
+    #[allow(dead_code)]
     description: Option<String>,
 }
 
@@ -54,6 +55,8 @@ struct SiteOverview {
     name: String,
     description: String,
     authentication: Option<Authentication>,
+    #[serde(default)]
+    auth_methods: Option<Vec<crate::descriptor::AuthMethod>>,
     groups: Vec<SiteGroup>,
 }
 
@@ -109,6 +112,7 @@ struct ResponseInfo {
 #[derive(Deserialize)]
 struct ActionDetail {
     site: String,
+    #[allow(dead_code)]
     group: String,
     action: String,
     method: String,
@@ -120,6 +124,8 @@ struct ActionDetail {
     request_body: Option<RequestBody>,
     responses: Vec<ResponseInfo>,
     authentication: Option<Authentication>,
+    #[serde(default)]
+    auth_methods: Option<Vec<crate::descriptor::AuthMethod>>,
     // Server returns only the $ref types this action transitively depends on,
     // keyed by schema name (e.g. `Parent`). Schemas reference each other by
     // ref name in the TYPE column; this section defines them.
@@ -223,8 +229,8 @@ fn extract_site_meta(data: &SiteOverview) -> SiteMeta {
                 .find_map(|group| group.base_url.as_ref().cloned())
         });
 
-    // Auth from authentication struct
-    let auth = data.authentication.as_ref().map(|a| format_auth_from_struct(a, &data.name));
+    // Prefer new auth_methods; fall back to legacy Authentication struct.
+    let auth = render_site_auth(&data.auth_methods, data.authentication.as_ref(), &data.name);
 
     // Version header from description
     let header = {
@@ -248,7 +254,7 @@ fn extract_site_meta(data: &SiteOverview) -> SiteMeta {
 
     if is_graphql {
         let endpoint = base_url.as_ref().map(|u| format!("POST {}", u));
-        let gql_auth = data.authentication.as_ref().map(|a| format_auth_from_struct(a, &data.name));
+        let gql_auth = render_site_auth(&data.auth_methods, data.authentication.as_ref(), &data.name);
 
         SiteMeta {
             base_url: None,
@@ -278,6 +284,103 @@ fn format_auth_from_struct(auth: &Authentication, site: &str) -> String {
     } else {
         format!("{}: {}", name, key_var)
     }
+}
+
+/// Renders the `auth:` / `Auth:` line for site + action overviews. New CLI
+/// prefers `auth_methods` when present; falls back to the legacy
+/// `Authentication` struct so older servers keep working. When
+/// `auth_methods` is explicitly an empty array, the site is an un-upgraded
+/// OAuth spec — we surface a hint instead of rendering a template.
+fn render_site_auth(
+    methods: &Option<Vec<crate::descriptor::AuthMethod>>,
+    legacy: Option<&Authentication>,
+    site: &str,
+) -> Option<String> {
+    if let Some(ms) = methods {
+        if ms.is_empty() {
+            return Some(
+                "This spec's OAuth configuration is not upgraded. Contact the registry maintainer."
+                    .to_string(),
+            );
+        }
+        return Some(format_auth_methods(ms, site));
+    }
+    legacy.map(|a| format_auth_from_struct(a, site))
+}
+
+/// Per design §8.3: render one line per method describing how to inject the
+/// credential, using `$POSTAGENT.<SITE>.*` templates.
+fn render_method_line(method: &crate::descriptor::AuthMethod, site: &str) -> String {
+    use crate::descriptor::AuthMethod;
+    let upper = site.to_uppercase();
+    match method {
+        AuthMethod::Static(s) => {
+            let key_var = format!("$POSTAGENT.{}.API_KEY", upper);
+            if s.scheme == "bearer"
+                && s.location == "header"
+                && s.name.eq_ignore_ascii_case("Authorization")
+            {
+                format!("{}: Bearer {}", s.name, key_var)
+            } else {
+                format!("{}: {}", s.name, key_var)
+            }
+        }
+        AuthMethod::Oauth2(o) => {
+            let token_var = format!("$POSTAGENT.{}.TOKEN", upper);
+            let rendered_value = o.inject.value_template.replace("{access_token}", &token_var);
+            format!("{}: {}", o.inject.name, rendered_value)
+        }
+    }
+}
+
+pub fn format_auth_methods(methods: &[crate::descriptor::AuthMethod], site: &str) -> String {
+    if methods.len() == 1 {
+        return render_method_line(&methods[0], site);
+    }
+    methods
+        .iter()
+        .map(|m| format!("- [{}] {}", m.label(), render_method_line(m, site)))
+        .collect::<Vec<_>>()
+        .join("\n             ")
+}
+
+/// Fetches the site-level manual response and returns `auth_methods` if present.
+/// Used by `postagent auth <site>` to dispatch on the descriptor. Returns
+/// `Ok(None)` when the server didn't include `auth_methods` (legacy server).
+pub fn fetch_site_auth_methods(
+    site: &str,
+) -> Result<Option<Vec<crate::descriptor::AuthMethod>>, Box<dyn std::error::Error>> {
+    let client = Client::new();
+    let url = format!(
+        "{}/api/manual?site={}",
+        crate::config::api_base(),
+        urlencoding(site)
+    );
+    let mut request = client.get(&url);
+    if let Some(api_key) = super::config::resolve_api_key() {
+        request = request.header("x-api-key", api_key);
+    }
+    let response = request
+        .send()
+        .map_err(|_| "Failed to connect to postagent server.")?;
+
+    if !response.status().is_success() {
+        let body: serde_json::Value = response.json()?;
+        crate::api_response::print_api_error(&body);
+        return Err("manual fetch failed".into());
+    }
+
+    let body_text = response.text()?;
+    let data = crate::api_response::unwrap_data(serde_json::from_str(&body_text)?);
+
+    // Parse just the fields we need — avoid depending on the rest of the shape.
+    #[derive(serde::Deserialize)]
+    struct AuthOnly {
+        #[serde(default)]
+        auth_methods: Option<Vec<crate::descriptor::AuthMethod>>,
+    }
+    let parsed: AuthOnly = serde_json::from_value(data).unwrap_or(AuthOnly { auth_methods: None });
+    Ok(parsed.auth_methods)
 }
 
 fn format_site_overview(data: &SiteOverview) -> String {
@@ -725,8 +828,8 @@ fn format_action_detail(data: &ActionDetail) -> String {
             output.push_str(&format!("  base_url:  {}\n", base_url));
         }
     }
-    if let Some(ref auth) = data.authentication {
-        output.push_str(&format!("  auth:      {}\n", format_auth_from_struct(auth, &data.site)));
+    if let Some(auth_line) = render_site_auth(&data.auth_methods, data.authentication.as_ref(), &data.site) {
+        output.push_str(&format!("  auth:      {}\n", auth_line));
     }
 
     // Separator
@@ -927,6 +1030,7 @@ mod tests {
             name: "test".into(),
             description: "".into(),
             authentication: None,
+            auth_methods: None,
             groups: vec![SiteGroup {
                 name: "big_group".into(),
                 base_url: None,
@@ -946,6 +1050,7 @@ mod tests {
             name: "notion".into(),
             description: "Docs at `developers.notion.com`.".into(),
             authentication: None,
+            auth_methods: None,
             groups: vec![SiteGroup {
                 name: "pages".into(),
                 base_url: Some("https://api.notion.com".into()),

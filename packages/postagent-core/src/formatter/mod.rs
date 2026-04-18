@@ -1,4 +1,5 @@
 /// Truncate a string to max_len chars, appending `…` if truncated.
+#[allow(dead_code)]
 pub fn truncate(s: &str, max_len: usize) -> String {
     let chars: Vec<char> = s.chars().collect();
     if chars.len() <= max_len {

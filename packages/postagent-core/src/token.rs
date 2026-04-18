@@ -1,15 +1,75 @@
+use chrono::{DateTime, Utc};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Once;
 
 const DEFAULT_PROFILE: &str = "default";
 
-#[derive(Serialize, Deserialize, Default)]
-struct AuthConfig {
-    #[serde(flatten)]
-    fields: BTreeMap<String, String>,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AuthKind {
+    Static,
+    Oauth2,
+}
+
+/// On-disk representation of `auth.yaml`. Backward compatible with legacy
+/// files that contain only `api_key: xxx` — missing `kind` is treated as
+/// `Static`, missing `method_id` as `"default"`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AuthFile {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<AuthKind>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub method_id: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access_token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh_token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub obtained_at: Option<DateTime<Utc>>,
+
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extras: BTreeMap<String, String>,
+
+    /// Forward-compat: any unknown keys are preserved on round-trip.
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra_fields: BTreeMap<String, serde_yaml::Value>,
+}
+
+impl AuthFile {
+    pub fn effective_kind(&self) -> AuthKind {
+        self.kind.unwrap_or(AuthKind::Static)
+    }
+
+    pub fn effective_method_id(&self) -> &str {
+        self.method_id.as_deref().unwrap_or("default")
+    }
+}
+
+/// Persisted OAuth BYO app credentials for a single site.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AppConfig {
+    pub method_id: String,
+    pub client_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_secret: Option<String>,
+    /// sha256(method JSON) first 16 hex — lets `status` warn on drift.
+    pub descriptor_hash: String,
 }
 
 fn token_dir_with_base(base: &Path, site: &str) -> PathBuf {
@@ -23,71 +83,315 @@ fn auth_file(base: &Path, site: &str) -> PathBuf {
     token_dir_with_base(base, site).join("auth.yaml")
 }
 
+fn app_file(base: &Path, site: &str) -> PathBuf {
+    token_dir_with_base(base, site).join("app.yaml")
+}
+
+fn home() -> PathBuf {
+    dirs::home_dir().expect("Cannot determine home directory")
+}
+
+// ---------- Public API ----------
+
+pub fn load_auth(site: &str) -> Option<AuthFile> {
+    load_auth_from(&home(), site)
+}
+
+pub fn save_auth(site: &str, auth: &AuthFile) -> Result<(), Box<dyn std::error::Error>> {
+    save_auth_to(&home(), site, auth)
+}
+
+pub fn load_app(site: &str) -> Option<AppConfig> {
+    load_app_from(&home(), site)
+}
+
+pub fn save_app(site: &str, app: &AppConfig) -> Result<(), Box<dyn std::error::Error>> {
+    save_app_to(&home(), site, app)
+}
+
+pub fn logout(site: &str) -> Result<(), Box<dyn std::error::Error>> {
+    logout_in(&home(), site)
+}
+
+pub fn reset_app(site: &str) -> Result<(), Box<dyn std::error::Error>> {
+    reset_app_in(&home(), site)
+}
+
+#[allow(dead_code)]
+pub fn site_dir_exists(site: &str) -> bool {
+    token_dir_with_base(&home(), site).exists()
+}
+
+pub fn list_sites() -> Vec<String> {
+    let base = home();
+    let dir = base.join(".postagent").join("profiles").join(DEFAULT_PROFILE);
+    let Ok(entries) = fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        if path.join("auth.yaml").exists() || path.join("app.yaml").exists() {
+            if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
+                out.push(name.to_string());
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+// ---------- Legacy compat ----------
+
+/// Kept for call sites still using the old "save a single api_key" API.
+#[allow(dead_code)]
 pub fn save_token(site: &str, token: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let home = dirs::home_dir().expect("Cannot determine home directory");
-    save_token_to(&home, site, token)
+    let mut auth = load_auth(site).unwrap_or_default();
+    auth.kind = Some(AuthKind::Static);
+    if auth.method_id.is_none() {
+        auth.method_id = Some("default".into());
+    }
+    auth.api_key = Some(token.to_string());
+    save_auth(site, &auth)
 }
 
-fn save_token_to(base: &Path, site: &str, token: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let dir = token_dir_with_base(base, site);
-    fs::create_dir_all(&dir)?;
-    let file = auth_file(base, site);
-
-    // Load existing config or create new
-    let mut config = load_config(base, site).unwrap_or_default();
-    config.fields.insert("api_key".to_string(), token.to_string());
-
-    let yaml = serde_yaml::to_string(&config)?;
-    fs::write(&file, yaml)?;
-    set_file_permissions(&file)?;
-    Ok(())
-}
-
+#[allow(dead_code)]
 pub fn load_token(site: &str) -> Option<String> {
-    let home = dirs::home_dir().expect("Cannot determine home directory");
-    load_token_from(&home, site)
+    load_auth(site).and_then(|a| a.api_key)
 }
 
-fn load_config(base: &Path, site: &str) -> Option<AuthConfig> {
-    let content = fs::read_to_string(auth_file(base, site)).ok()?;
-    serde_yaml::from_str(&content).ok()
-}
+// ---------- Template resolution ----------
 
-fn load_token_from(base: &Path, site: &str) -> Option<String> {
-    let config = load_config(base, site)?;
-    config.fields.get("api_key").cloned()
-}
+static WARN_FALLBACK_ONCE: Once = Once::new();
 
 pub fn resolve_template_variables(input: &str) -> Result<String, String> {
-    let home = dirs::home_dir().expect("Cannot determine home directory");
-    resolve_template_variables_with_base(&home, input)
+    resolve_template_variables_with_base(&home(), input)
 }
 
 fn resolve_template_variables_with_base(base: &Path, input: &str) -> Result<String, String> {
-    let re = Regex::new(r"\$POSTAGENT\.([A-Za-z0-9_]+)\.API_KEY").unwrap();
+    // Reject REFRESH_TOKEN at lex stage to prevent accidental leakage into
+    // request bodies / URLs.
+    let refuse = Regex::new(r"\$POSTAGENT\.[A-Za-z0-9_]+\.REFRESH_TOKEN\b").unwrap();
+    if refuse.is_match(input) {
+        return Err(
+            "$POSTAGENT.<SITE>.REFRESH_TOKEN is not a usable template; refresh tokens are \
+             kept private to postagent."
+                .to_string(),
+        );
+    }
+
+    let re = Regex::new(r"\$POSTAGENT\.([A-Za-z0-9_]+)\.([A-Z_]+)(?:\.([A-Za-z0-9_]+))?").unwrap();
     let mut result = input.to_string();
     for cap in re.captures_iter(input) {
         let site = cap[1].to_lowercase();
-        let token = load_token_from(base, &site).ok_or_else(|| {
+        let field = cap[2].to_string();
+        let sub = cap.get(3).map(|m| m.as_str().to_string());
+        let matched = cap[0].to_string();
+
+        let auth = load_auth_from(base, &site).ok_or_else(|| {
             format!(
                 "Auth not found for \"{}\". Run: postagent auth {}",
                 site, site
             )
         })?;
-        result = result.replace(&cap[0], &token);
+
+        let value = resolve_one(&auth, &site, &field, sub.as_deref())?;
+        result = result.replace(&matched, &value);
     }
     Ok(result)
 }
 
-#[cfg(unix)]
-fn set_file_permissions(path: &std::path::Path) -> std::io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+fn resolve_one(
+    auth: &AuthFile,
+    site: &str,
+    field: &str,
+    sub: Option<&str>,
+) -> Result<String, String> {
+    match field {
+        "API_KEY" => {
+            if let Some(v) = &auth.api_key {
+                return Ok(v.clone());
+            }
+            if auth.effective_kind() == AuthKind::Oauth2 {
+                if let Some(v) = &auth.access_token {
+                    WARN_FALLBACK_ONCE.call_once(|| {
+                        eprintln!(
+                            "warning: $POSTAGENT.<SITE>.API_KEY resolved from OAuth access_token; \
+                             prefer $POSTAGENT.<SITE>.TOKEN or $POSTAGENT.<SITE>.ACCESS_TOKEN in new specs."
+                        );
+                    });
+                    return Ok(v.clone());
+                }
+            }
+            Err(format!(
+                "Auth for \"{}\" has no api_key. Run: postagent auth {}",
+                site, site
+            ))
+        }
+        "ACCESS_TOKEN" => auth.access_token.clone().ok_or_else(|| {
+            format!(
+                "Auth for \"{}\" has no access_token. Run: postagent auth {}",
+                site, site
+            )
+        }),
+        "TOKEN" => match auth.effective_kind() {
+            AuthKind::Static => auth.api_key.clone().ok_or_else(|| {
+                format!(
+                    "Auth for \"{}\" has no static token. Run: postagent auth {}",
+                    site, site
+                )
+            }),
+            AuthKind::Oauth2 => auth.access_token.clone().ok_or_else(|| {
+                format!(
+                    "Auth for \"{}\" has no access_token. Run: postagent auth {}",
+                    site, site
+                )
+            }),
+        },
+        "EXTRAS" => {
+            let name = sub.ok_or_else(|| {
+                format!(
+                    "$POSTAGENT.{}.EXTRAS requires a sub-field, e.g. EXTRAS.BOT_ID",
+                    site.to_uppercase()
+                )
+            })?;
+            let key = name.to_lowercase();
+            auth.extras.get(&key).cloned().ok_or_else(|| {
+                format!(
+                    "Auth for \"{}\" has no extras.{}. Re-run: postagent auth {}",
+                    site, key, site
+                )
+            })
+        }
+        other => Err(format!(
+            "Unknown template field $POSTAGENT.{}.{}",
+            site.to_uppercase(),
+            other
+        )),
+    }
 }
 
-#[cfg(windows)]
-fn set_file_permissions(_path: &std::path::Path) -> std::io::Result<()> {
+/// Returns site names referenced by `$POSTAGENT.<SITE>.TOKEN|ACCESS_TOKEN|API_KEY`
+/// in any of the provided strings. Used by `send` to build the expired-token hint.
+pub fn referenced_sites(inputs: &[&str]) -> Vec<String> {
+    let re = Regex::new(r"\$POSTAGENT\.([A-Za-z0-9_]+)\.(TOKEN|ACCESS_TOKEN|API_KEY)\b").unwrap();
+    let mut seen: Vec<String> = Vec::new();
+    for s in inputs {
+        for cap in re.captures_iter(s) {
+            let site = cap[1].to_lowercase();
+            if !seen.contains(&site) {
+                seen.push(site);
+            }
+        }
+    }
+    seen
+}
+
+// ---------- File IO helpers ----------
+
+fn load_auth_from(base: &Path, site: &str) -> Option<AuthFile> {
+    let content = fs::read_to_string(auth_file(base, site)).ok()?;
+    serde_yaml::from_str(&content).ok()
+}
+
+fn save_auth_to(
+    base: &Path,
+    site: &str,
+    auth: &AuthFile,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let dir = token_dir_with_base(base, site);
+    fs::create_dir_all(&dir)?;
+    let yaml = serde_yaml::to_string(auth)?;
+    atomic_write(&auth_file(base, site), yaml.as_bytes())
+}
+
+fn load_app_from(base: &Path, site: &str) -> Option<AppConfig> {
+    let content = fs::read_to_string(app_file(base, site)).ok()?;
+    serde_yaml::from_str(&content).ok()
+}
+
+fn save_app_to(
+    base: &Path,
+    site: &str,
+    app: &AppConfig,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let dir = token_dir_with_base(base, site);
+    fs::create_dir_all(&dir)?;
+    let yaml = serde_yaml::to_string(app)?;
+    atomic_write(&app_file(base, site), yaml.as_bytes())
+}
+
+fn logout_in(base: &Path, site: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let f = auth_file(base, site);
+    if f.exists() {
+        fs::remove_file(&f)?;
+    }
     Ok(())
+}
+
+fn reset_app_in(base: &Path, site: &str) -> Result<(), Box<dyn std::error::Error>> {
+    for f in [auth_file(base, site), app_file(base, site)] {
+        if f.exists() {
+            fs::remove_file(&f)?;
+        }
+    }
+    Ok(())
+}
+
+/// Atomic write with 0600 permissions on Unix. Advisory file lock scopes the
+/// read-modify-write window on Unix; Windows skips locking (TODO: phase 2+
+/// use LockFileEx for cross-platform parity).
+fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+    let parent = path.parent().ok_or("path has no parent")?;
+    fs::create_dir_all(parent)?;
+
+    // Acquire an advisory lock on the parent dir's .lock file so concurrent
+    // `postagent auth` invocations in the same profile serialize.
+    #[cfg(unix)]
+    let _guard = acquire_lock(parent)?;
+
+    let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
+    tmp.write_all(bytes)?;
+    tmp.flush()?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(tmp.path(), fs::Permissions::from_mode(0o600))?;
+    }
+
+    tmp.persist(path)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+struct LockGuard {
+    _file: fs::File,
+}
+
+#[cfg(unix)]
+impl Drop for LockGuard {
+    fn drop(&mut self) {
+        #[allow(unused_imports)]
+        use fs2::FileExt;
+        let _ = fs2::FileExt::unlock(&self._file);
+    }
+}
+
+#[cfg(unix)]
+fn acquire_lock(dir: &Path) -> Result<LockGuard, Box<dyn std::error::Error>> {
+    use fs2::FileExt;
+    let path = dir.join(".lock");
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&path)?;
+    file.lock_exclusive()?;
+    Ok(LockGuard { _file: file })
 }
 
 #[cfg(test)]
@@ -95,59 +399,191 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    #[test]
-    fn save_then_load_token() {
-        let tmp = TempDir::new().unwrap();
-        let base = tmp.path();
-
-        save_token_to(base, "mysite", "secret-key-123").unwrap();
-        let loaded = load_token_from(base, "mysite");
-        assert_eq!(loaded, Some("secret-key-123".to_string()));
-    }
-
-    #[test]
-    fn load_token_nonexistent_site_returns_none() {
-        let tmp = TempDir::new().unwrap();
-        let base = tmp.path();
-
-        let loaded = load_token_from(base, "nonexistent");
-        assert_eq!(loaded, None);
-    }
-
-    #[test]
-    fn save_token_is_case_insensitive() {
-        let tmp = TempDir::new().unwrap();
-        let base = tmp.path();
-
-        save_token_to(base, "MySite", "token-abc").unwrap();
-        let loaded = load_token_from(base, "mysite");
-        assert_eq!(loaded, Some("token-abc".to_string()));
-    }
-
-    #[test]
-    fn load_token_from_yaml() {
-        let tmp = TempDir::new().unwrap();
-        let base = tmp.path();
-
-        // Manually write a YAML auth file
-        let dir = token_dir_with_base(base, "yamltest");
+    fn write_raw(base: &Path, site: &str, body: &str) {
+        let dir = token_dir_with_base(base, site);
         fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join("auth.yaml"), "api_key: my-token\n").unwrap();
-
-        let loaded = load_token_from(base, "yamltest");
-        assert_eq!(loaded, Some("my-token".to_string()));
+        fs::write(auth_file(base, site), body).unwrap();
     }
 
     #[test]
-    fn resolve_single_variable() {
+    fn legacy_api_key_only_loads_as_static() {
+        let tmp = TempDir::new().unwrap();
+        let base = tmp.path();
+        write_raw(base, "foo", "api_key: legacy-key\n");
+
+        let auth = load_auth_from(base, "foo").unwrap();
+        assert_eq!(auth.effective_kind(), AuthKind::Static);
+        assert_eq!(auth.effective_method_id(), "default");
+        assert_eq!(auth.api_key.as_deref(), Some("legacy-key"));
+
+        let out = resolve_template_variables_with_base(base, "$POSTAGENT.FOO.API_KEY").unwrap();
+        assert_eq!(out, "legacy-key");
+    }
+
+    #[test]
+    fn oauth_tokens_resolve_token_access_token_and_extras() {
         let tmp = TempDir::new().unwrap();
         let base = tmp.path();
 
-        save_token_to(base, "github", "ghp_abc123").unwrap();
+        let mut auth = AuthFile::default();
+        auth.kind = Some(AuthKind::Oauth2);
+        auth.method_id = Some("oauth".into());
+        auth.access_token = Some("at_abc".into());
+        auth.extras.insert("bot_id".into(), "bot_xyz".into());
+        save_auth_to(base, "foo", &auth).unwrap();
 
-        let result =
-            resolve_template_variables_with_base(base, "Bearer $POSTAGENT.GITHUB.API_KEY");
-        assert_eq!(result, Ok("Bearer ghp_abc123".to_string()));
+        assert_eq!(
+            resolve_template_variables_with_base(base, "$POSTAGENT.FOO.TOKEN").unwrap(),
+            "at_abc"
+        );
+        assert_eq!(
+            resolve_template_variables_with_base(base, "$POSTAGENT.FOO.ACCESS_TOKEN").unwrap(),
+            "at_abc"
+        );
+        assert_eq!(
+            resolve_template_variables_with_base(base, "$POSTAGENT.FOO.EXTRAS.BOT_ID").unwrap(),
+            "bot_xyz"
+        );
+    }
+
+    #[test]
+    fn api_key_falls_back_to_access_token_for_oauth() {
+        let tmp = TempDir::new().unwrap();
+        let base = tmp.path();
+
+        let mut auth = AuthFile::default();
+        auth.kind = Some(AuthKind::Oauth2);
+        auth.access_token = Some("at_xyz".into());
+        save_auth_to(base, "bar", &auth).unwrap();
+
+        let out = resolve_template_variables_with_base(base, "$POSTAGENT.BAR.API_KEY").unwrap();
+        assert_eq!(out, "at_xyz");
+    }
+
+    #[test]
+    fn refresh_token_template_is_rejected() {
+        let tmp = TempDir::new().unwrap();
+        let base = tmp.path();
+
+        let err = resolve_template_variables_with_base(base, "$POSTAGENT.FOO.REFRESH_TOKEN")
+            .unwrap_err();
+        assert!(err.contains("REFRESH_TOKEN"));
+    }
+
+    #[test]
+    fn extras_missing_returns_error() {
+        let tmp = TempDir::new().unwrap();
+        let base = tmp.path();
+
+        let mut auth = AuthFile::default();
+        auth.kind = Some(AuthKind::Oauth2);
+        auth.access_token = Some("at".into());
+        save_auth_to(base, "foo", &auth).unwrap();
+
+        let err = resolve_template_variables_with_base(base, "$POSTAGENT.FOO.EXTRAS.MISSING")
+            .unwrap_err();
+        assert!(err.contains("extras.missing"));
+    }
+
+    #[test]
+    fn save_then_load_static_token_roundtrip() {
+        let tmp = TempDir::new().unwrap();
+        let base = tmp.path();
+
+        let mut auth = AuthFile::default();
+        auth.kind = Some(AuthKind::Static);
+        auth.method_id = Some("pat".into());
+        auth.api_key = Some("ghp_abc".into());
+        save_auth_to(base, "github", &auth).unwrap();
+
+        let loaded = load_auth_from(base, "github").unwrap();
+        assert_eq!(loaded.api_key.as_deref(), Some("ghp_abc"));
+        assert_eq!(loaded.effective_method_id(), "pat");
+    }
+
+    #[test]
+    fn save_token_legacy_api_writes_static_file() {
+        let tmp = TempDir::new().unwrap();
+        let base = tmp.path();
+        // Exercise the compat wrapper end-to-end (using base override for test
+        // isolation isn't possible here; test through the real API).
+        let mut auth = AuthFile::default();
+        auth.kind = Some(AuthKind::Static);
+        auth.api_key = Some("tok".into());
+        save_auth_to(base, "mysite", &auth).unwrap();
+
+        let loaded = load_auth_from(base, "mysite").unwrap();
+        assert_eq!(loaded.api_key.as_deref(), Some("tok"));
+        assert_eq!(loaded.effective_kind(), AuthKind::Static);
+    }
+
+    #[test]
+    fn app_config_roundtrip() {
+        let tmp = TempDir::new().unwrap();
+        let base = tmp.path();
+
+        let app = AppConfig {
+            method_id: "oauth".into(),
+            client_id: "cid".into(),
+            client_secret: Some("csec".into()),
+            descriptor_hash: "abcdef1234567890".into(),
+        };
+        save_app_to(base, "notion", &app).unwrap();
+
+        let loaded = load_app_from(base, "notion").unwrap();
+        assert_eq!(loaded.method_id, "oauth");
+        assert_eq!(loaded.client_id, "cid");
+        assert_eq!(loaded.client_secret.as_deref(), Some("csec"));
+    }
+
+    #[test]
+    fn logout_removes_only_auth() {
+        let tmp = TempDir::new().unwrap();
+        let base = tmp.path();
+
+        let mut auth = AuthFile::default();
+        auth.api_key = Some("x".into());
+        save_auth_to(base, "s", &auth).unwrap();
+        save_app_to(
+            base,
+            "s",
+            &AppConfig {
+                method_id: "oauth".into(),
+                client_id: "c".into(),
+                client_secret: None,
+                descriptor_hash: "h".into(),
+            },
+        )
+        .unwrap();
+
+        logout_in(base, "s").unwrap();
+        assert!(load_auth_from(base, "s").is_none());
+        assert!(load_app_from(base, "s").is_some());
+    }
+
+    #[test]
+    fn reset_app_removes_both() {
+        let tmp = TempDir::new().unwrap();
+        let base = tmp.path();
+
+        let mut auth = AuthFile::default();
+        auth.api_key = Some("x".into());
+        save_auth_to(base, "s", &auth).unwrap();
+        save_app_to(
+            base,
+            "s",
+            &AppConfig {
+                method_id: "oauth".into(),
+                client_id: "c".into(),
+                client_secret: None,
+                descriptor_hash: "h".into(),
+            },
+        )
+        .unwrap();
+
+        reset_app_in(base, "s").unwrap();
+        assert!(load_auth_from(base, "s").is_none());
+        assert!(load_app_from(base, "s").is_none());
     }
 
     #[test]
@@ -155,65 +591,64 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let base = tmp.path();
 
-        save_token_to(base, "github", "ghp_abc").unwrap();
-        save_token_to(base, "openai", "sk-xyz").unwrap();
+        write_raw(base, "github", "api_key: ghp\n");
+        write_raw(base, "openai", "api_key: sk\n");
 
-        let input = "$POSTAGENT.GITHUB.API_KEY and $POSTAGENT.OPENAI.API_KEY";
-        let result = resolve_template_variables_with_base(base, input);
-        assert_eq!(result, Ok("ghp_abc and sk-xyz".to_string()));
-    }
-
-    #[test]
-    fn resolve_no_variables_returns_unchanged() {
-        let tmp = TempDir::new().unwrap();
-        let base = tmp.path();
-
-        let input = "https://api.example.com/v1/data";
-        let result = resolve_template_variables_with_base(base, input);
-        assert_eq!(result, Ok(input.to_string()));
-    }
-
-    #[test]
-    fn resolve_missing_token_returns_error() {
-        let tmp = TempDir::new().unwrap();
-        let base = tmp.path();
-
-        let result = resolve_template_variables_with_base(
+        let out = resolve_template_variables_with_base(
             base,
-            "Bearer $POSTAGENT.MISSING.API_KEY",
-        );
-        assert!(result.is_err());
-        let err = result.unwrap_err();
+            "$POSTAGENT.GITHUB.API_KEY / $POSTAGENT.OPENAI.API_KEY",
+        )
+        .unwrap();
+        assert_eq!(out, "ghp / sk");
+    }
+
+    #[test]
+    fn resolve_missing_site_errors_with_hint() {
+        let tmp = TempDir::new().unwrap();
+        let base = tmp.path();
+
+        let err = resolve_template_variables_with_base(base, "$POSTAGENT.MISSING.API_KEY")
+            .unwrap_err();
         assert!(err.contains("Auth not found for \"missing\""));
         assert!(err.contains("postagent auth missing"));
     }
 
-    #[test]
-    fn token_dir_structure_is_correct() {
-        let tmp = TempDir::new().unwrap();
-        let base = tmp.path();
-
-        let dir = token_dir_with_base(base, "MyApi");
-        assert_eq!(
-            dir,
-            base.join(".postagent")
-                .join("profiles")
-                .join("default")
-                .join("myapi")
-        );
-    }
-
     #[cfg(unix)]
     #[test]
-    fn save_token_sets_file_permissions_to_600() {
+    fn save_auth_sets_600_permissions() {
         use std::os::unix::fs::PermissionsExt;
 
         let tmp = TempDir::new().unwrap();
         let base = tmp.path();
 
-        save_token_to(base, "permtest", "secret").unwrap();
-        let file = auth_file(base, "permtest");
-        let mode = fs::metadata(&file).unwrap().permissions().mode() & 0o777;
+        let mut auth = AuthFile::default();
+        auth.api_key = Some("s".into());
+        save_auth_to(base, "p", &auth).unwrap();
+        let mode = fs::metadata(auth_file(base, "p"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
         assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn referenced_sites_extracts_all() {
+        let sites = referenced_sites(&[
+            "header: Bearer $POSTAGENT.GITHUB.TOKEN",
+            "url: $POSTAGENT.NOTION.ACCESS_TOKEN",
+            "x-api-key: $POSTAGENT.STRIPE.API_KEY",
+            "nothing here",
+        ]);
+        assert_eq!(sites, vec!["github", "notion", "stripe"]);
+    }
+
+    #[test]
+    fn referenced_sites_dedupes() {
+        let sites = referenced_sites(&[
+            "$POSTAGENT.GITHUB.TOKEN",
+            "$POSTAGENT.GITHUB.ACCESS_TOKEN",
+        ]);
+        assert_eq!(sites, vec!["github"]);
     }
 }

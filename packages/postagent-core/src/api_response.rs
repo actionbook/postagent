@@ -5,8 +5,7 @@ use serde_json::Value;
 pub fn unwrap_data(envelope: Value) -> Value {
     match envelope {
         Value::Object(mut map) => {
-            map.remove("data")
-                .unwrap_or_else(|| Value::Object(map))
+            map.remove("data").unwrap_or(Value::Object(map))
         }
         other => other,
     }
