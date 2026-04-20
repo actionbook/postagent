@@ -4,7 +4,7 @@ pub mod loopback;
 pub mod pkce;
 pub mod state;
 
-pub const REDIRECT_URI: &str = "http://127.0.0.1:33421/callback";
+pub const REDIRECT_URI: &str = "http://127.0.0.1:9876/callback";
 
 use crate::descriptor::OAuth2AuthMethod;
 use exchange::{ExchangeInputs, TokenResponse};
@@ -131,10 +131,13 @@ fn build_authorize_url(
     Ok(url)
 }
 
+/// Substitutes `{{name}}` placeholders with values from `values`. Single-brace
+/// `{name}` is preserved as a literal character sequence (common in URL path
+/// templates, OpenAPI refs). See `docs/design/oauth.md §3.2a`.
 fn apply_placeholders(raw: &str, values: &BTreeMap<String, String>) -> String {
     let mut out = raw.to_string();
     for (k, v) in values {
-        let needle = format!("{{{}}}", k);
+        let needle = format!("{{{{{}}}}}", k); // literal `{{k}}`
         out = out.replace(&needle, v);
     }
     out
@@ -197,13 +200,14 @@ mod tests {
                 separator: " ".into(),
                 buckets: None,
                 refresh_magic_scope: None,
+                catalog: None,
             },
             refresh: RefreshSpec { behavior: "reusable".into(), expiry_instructions: None },
-            inject: InjectSpec {
+            injects: vec![InjectSpec {
                 location: "header".into(),
                 name: "Authorization".into(),
-                value_template: "Bearer {access_token}".into(),
-            },
+                value_template: "Bearer {{access_token}}".into(),
+            }],
         }
     }
 
@@ -219,14 +223,14 @@ mod tests {
         assert!(url.contains("code_challenge_method=S256"));
         assert!(url.contains("state=st"));
         assert!(url.contains("scope=repo%20read%3Auser"));
-        assert!(url.contains("redirect_uri=http%3A%2F%2F127.0.0.1%3A33421%2Fcallback"));
+        assert!(url.contains("redirect_uri=http%3A%2F%2F127.0.0.1%3A9876%2Fcallback"));
     }
 
     #[test]
     fn extra_params_merged_and_placeholders_applied() {
         let mut extra = BTreeMap::new();
         extra.insert("owner".into(), "user".into());
-        extra.insert("tenant".into(), "{tenant}".into());
+        extra.insert("tenant".into(), "{{tenant}}".into());
 
         let m = make_method(Some(extra));
         let mut ph = BTreeMap::new();
@@ -235,6 +239,19 @@ mod tests {
         let url = build_authorize_url(&m, "cid", "st", "chal", "", &ph).unwrap();
         assert!(url.contains("owner=user"));
         assert!(url.contains("tenant=acme"));
+    }
+
+    #[test]
+    fn single_brace_is_treated_as_literal() {
+        // `{tenant}` (single brace) must NOT be substituted — it commonly
+        // appears as a URL path template in docs and must pass through.
+        let mut extra = BTreeMap::new();
+        extra.insert("target".into(), "/repos/{owner}/{repo}".into());
+
+        let m = make_method(Some(extra));
+        let url = build_authorize_url(&m, "cid", "st", "chal", "", &BTreeMap::new()).unwrap();
+        // The literal `{owner}` / `{repo}` are percent-encoded (%7B / %7D).
+        assert!(url.contains("target=%2Frepos%2F%7Bowner%7D%2F%7Brepo%7D"));
     }
 
     #[test]

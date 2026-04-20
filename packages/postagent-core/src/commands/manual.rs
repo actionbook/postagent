@@ -309,14 +309,19 @@ fn render_site_auth(
 }
 
 /// Per design §8.3: render one line per method describing how to inject the
-/// credential, using `$POSTAGENT.<SITE>.*` templates.
+/// credential, using `$POSTAGENT.<SITE>.*` templates. When an OAuth method
+/// declares multiple `injects` entries (Shopify, Slack dual, Feishu), each is
+/// rendered on its own sub-line so the user can see every header they need.
 fn render_method_line(method: &crate::descriptor::AuthMethod, site: &str) -> String {
     use crate::descriptor::AuthMethod;
     let upper = site.to_uppercase();
     match method {
         AuthMethod::Static(s) => {
             let key_var = format!("$POSTAGENT.{}.API_KEY", upper);
-            if s.scheme == "bearer"
+            if let Some(tmpl) = &s.value_template {
+                let rendered = tmpl.replace("{{token}}", &key_var);
+                format!("{}: {}", s.name, rendered)
+            } else if s.scheme == "bearer"
                 && s.location == "header"
                 && s.name.eq_ignore_ascii_case("Authorization")
             {
@@ -327,8 +332,15 @@ fn render_method_line(method: &crate::descriptor::AuthMethod, site: &str) -> Str
         }
         AuthMethod::Oauth2(o) => {
             let token_var = format!("$POSTAGENT.{}.TOKEN", upper);
-            let rendered_value = o.inject.value_template.replace("{access_token}", &token_var);
-            format!("{}: {}", o.inject.name, rendered_value)
+            let lines: Vec<String> = o
+                .injects
+                .iter()
+                .map(|inj| {
+                    let rendered = inj.value_template.replace("{{access_token}}", &token_var);
+                    format!("{}: {}", inj.name, rendered)
+                })
+                .collect();
+            lines.join("\n             ")
         }
     }
 }
@@ -337,11 +349,65 @@ pub fn format_auth_methods(methods: &[crate::descriptor::AuthMethod], site: &str
     if methods.len() == 1 {
         return render_method_line(&methods[0], site);
     }
+    // Multi-method: list each by method id (short, stable) rather than label
+    // (often long marketing copy). Prefix with `id=` so an agent reading this
+    // knows which id to pass to `postagent auth <site> --method <id>`.
     methods
         .iter()
-        .map(|m| format!("- [{}] {}", m.label(), render_method_line(m, site)))
+        .map(|m| format!("[{}] {}", m.id(), render_method_line(m, site)))
         .collect::<Vec<_>>()
         .join("\n             ")
+}
+
+/// Picks the send-time token template to recommend in "Next step" hints.
+///
+/// Priority:
+///   1. `auth_methods` non-empty  → `.TOKEN` (dispatches on saved kind,
+///      works for both static and oauth2 — safe universal default).
+///   2. `auth_methods` empty / absent but legacy `authentication` present
+///      → `.API_KEY` (pre-OAuth path; only makes sense for static sites).
+///   3. Neither present → None (caller omits the hint).
+fn primary_send_template(
+    auth_methods: &Option<Vec<crate::descriptor::AuthMethod>>,
+    legacy: Option<&Authentication>,
+    site: &str,
+) -> Option<String> {
+    let upper = site.to_uppercase();
+    match auth_methods {
+        Some(ms) if !ms.is_empty() => Some(format!("$POSTAGENT.{}.TOKEN", upper)),
+        _ => legacy.map(|_| format!("$POSTAGENT.{}.API_KEY", upper)),
+    }
+}
+
+/// Renders the bottom "Next step" block for L2 / L3 outputs. Centralizes
+/// the send-template guidance so it stays consistent and always reflects
+/// the site's actual auth configuration (previously L3 hardcoded .API_KEY,
+/// which misled agents on OAuth sites).
+fn format_send_hint(
+    auth_methods: &Option<Vec<crate::descriptor::AuthMethod>>,
+    legacy: Option<&Authentication>,
+    site: &str,
+) -> String {
+    let mut out = String::from(
+        "  Next step: use `postagent send <CURL_QUERY>` to send an HTTP request with a cURL syntax.\n",
+    );
+    let is_multi = auth_methods.as_ref().map(|m| m.len() > 1).unwrap_or(false);
+    if is_multi {
+        out.push_str(&format!(
+            "  This site supports multiple auth methods (see `auth:` above). Run\n\
+             \x20 `postagent auth {site}` to pick one, then pass $POSTAGENT.{upper}.TOKEN\n\
+             \x20 (or whichever template is shown above) as a literal string in -H / -d / URL.\n",
+            site = site,
+            upper = site.to_uppercase(),
+        ));
+    } else if let Some(var) = primary_send_template(auth_methods, legacy, site) {
+        out.push_str(&format!(
+            "  `postagent send` substitutes {} with your saved credentials —\n\
+             \x20 pass it as a literal string; do not try to fetch the value separately.\n",
+            var
+        ));
+    }
+    out
 }
 
 /// Fetches the site-level manual response and returns `auth_methods` if present.
@@ -387,7 +453,7 @@ fn format_site_overview(data: &SiteOverview) -> String {
     let meta = extract_site_meta(data);
 
     let mut output = String::new();
-    output.push_str(&format!("  === {}\n\n", data.name));
+    output.push_str(&format!("  Site:      {}\n", data.name));
 
     // Render metadata block
     if meta.api_type.as_deref() == Some("GraphQL") {
@@ -920,14 +986,11 @@ fn format_action_detail(data: &ActionDetail) -> String {
 
     // Send hint
     output.push_str("\n  ---\n\n");
-    output.push_str("  Next step: use `postagent send <CURL_QUERY>` to send an HTTP request with a cURL syntax.\n");
-    if data.authentication.is_some() {
-        let key_var = format!("$POSTAGENT.{}.API_KEY", data.site.to_uppercase());
-        output.push_str(&format!(
-            "  `postagent send` will replace {} with your saved credentials.\n",
-            key_var
-        ));
-    }
+    output.push_str(&format_send_hint(
+        &data.auth_methods,
+        data.authentication.as_ref(),
+        &data.site,
+    ));
 
     output.trim_end().to_string()
 }
@@ -1012,7 +1075,7 @@ mod tests {
         .unwrap();
 
         let output = format_site_overview(&data);
-        assert!(output.contains("=== notion"));
+        assert!(output.contains("Site:      notion"));
         assert!(output.contains("Base URL:"));
         assert!(output.contains("https://api.notion.com"));
         assert!(output.contains("Auth:"));
@@ -1060,6 +1123,67 @@ mod tests {
 
         let output = format_site_overview(&data);
         assert!(output.contains("Base URL:  https://api.notion.com"));
+    }
+
+    #[test]
+    fn site_overview_oauth_site_shows_token_template() {
+        // OAuth-only gmail: .TOKEN (not .API_KEY) must appear in auth line.
+        let data: SiteOverview = serde_json::from_value(json!({
+            "name": "gmail",
+            "description": "All requests go to `https://gmail.googleapis.com`.",
+            "authentication": null,
+            "auth_methods": [{
+                "kind": "oauth2",
+                "id": "oauth",
+                "label": "OAuth 2.0",
+                "grants": ["authorization_code"],
+                "client": { "type": "public" },
+                "authorize": { "url": "https://accounts.google.com/o/oauth2/v2/auth" },
+                "token": {
+                    "url": "https://oauth2.googleapis.com/token",
+                    "body_encoding": "form",
+                    "client_auth": "either",
+                    "response_map": { "access_token": "/access_token" }
+                },
+                "scopes": { "default": [], "separator": " " },
+                "refresh": { "behavior": "reusable" },
+                "injects": [{ "in": "header", "name": "Authorization", "value_template": "Bearer {{access_token}}" }]
+            }],
+            "groups": []
+        })).unwrap();
+
+        let out = format_site_overview(&data);
+        assert!(out.contains("Authorization: Bearer $POSTAGENT.GMAIL.TOKEN"));
+        assert!(!out.contains("GMAIL.API_KEY"), "OAuth sites must not surface .API_KEY");
+    }
+
+    #[test]
+    fn site_overview_multi_method_lists_both_templates() {
+        let data: SiteOverview = serde_json::from_value(json!({
+            "name": "github",
+            "description": "",
+            "authentication": null,
+            "auth_methods": [
+                { "kind": "static", "id": "pat", "label": "PAT", "scheme": "bearer", "in": "header", "name": "Authorization" },
+                {
+                    "kind": "oauth2", "id": "oauth", "label": "OAuth",
+                    "grants": ["authorization_code"], "client": { "type": "public" },
+                    "authorize": { "url": "https://github.com/login/oauth/authorize" },
+                    "token": { "url": "https://github.com/login/oauth/access_token", "body_encoding": "form", "client_auth": "either", "response_map": { "access_token": "/access_token" } },
+                    "scopes": { "default": [], "separator": " " }, "refresh": { "behavior": "reusable" },
+                    "injects": [{ "in": "header", "name": "Authorization", "value_template": "Bearer {{access_token}}" }]
+                }
+            ],
+            "groups": []
+        })).unwrap();
+
+        let out = format_site_overview(&data);
+        // Both templates visible in the top Auth: line, prefixed by method id
+        // (not long label) so lines stay compact.
+        assert!(out.contains("[pat]"));
+        assert!(out.contains("[oauth]"));
+        assert!(out.contains("$POSTAGENT.GITHUB.API_KEY"));
+        assert!(out.contains("$POSTAGENT.GITHUB.TOKEN"));
     }
 
     #[test]
@@ -1165,6 +1289,41 @@ mod tests {
         assert!(output.contains("properties"));
         assert!(output.contains("## Response"));
         assert!(output.contains("**200**"));
+    }
+
+    #[test]
+    fn action_detail_oauth_site_shows_token_in_send_hint() {
+        // The L3 footer used to hardcode `.API_KEY`, which misled agents on
+        // OAuth sites into trying `$POSTAGENT.<SITE>.API_KEY`. Verify the
+        // fixed hint points to `.TOKEN` for an OAuth-only site.
+        let data: ActionDetail = serde_json::from_value(json!({
+            "site": "gmail",
+            "group": "users",
+            "action": "get_profile",
+            "method": "GET",
+            "path": "/gmail/v1/users/{userId}/profile",
+            "base_url": "https://gmail.googleapis.com",
+            "description": "Get the authenticated user's Gmail profile.",
+            "parameters": [],
+            "responses": [{ "status": "200", "description": "OK", "schema": {} }],
+            "authentication": null,
+            "auth_methods": [{
+                "kind": "oauth2", "id": "oauth", "label": "OAuth",
+                "grants": ["authorization_code"], "client": { "type": "public" },
+                "authorize": { "url": "https://accounts.google.com/o/oauth2/v2/auth" },
+                "token": { "url": "https://oauth2.googleapis.com/token", "body_encoding": "form", "client_auth": "either", "response_map": { "access_token": "/access_token" } },
+                "scopes": { "default": [], "separator": " " }, "refresh": { "behavior": "reusable" },
+                "injects": [{ "in": "header", "name": "Authorization", "value_template": "Bearer {{access_token}}" }]
+            }]
+        })).unwrap();
+
+        let output = format_action_detail(&data);
+        assert!(output.contains("Bearer $POSTAGENT.GMAIL.TOKEN"), "auth line must show .TOKEN");
+        assert!(
+            output.contains("substitutes $POSTAGENT.GMAIL.TOKEN"),
+            "send hint must also point to .TOKEN (was hardcoded to .API_KEY before fix)"
+        );
+        assert!(!output.contains("GMAIL.API_KEY"), "OAuth-only site must never surface .API_KEY");
     }
 
     #[test]

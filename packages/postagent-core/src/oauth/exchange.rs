@@ -202,16 +202,17 @@ mod tests {
                 separator: " ".into(),
                 buckets: None,
                 refresh_magic_scope: None,
+                catalog: None,
             },
             refresh: RefreshSpec {
                 behavior: "reusable".into(),
                 expiry_instructions: None,
             },
-            inject: InjectSpec {
+            injects: vec![InjectSpec {
                 location: "header".into(),
                 name: "Authorization".into(),
-                value_template: "Bearer {access_token}".into(),
-            },
+                value_template: "Bearer {{access_token}}".into(),
+            }],
         }
     }
 
@@ -299,7 +300,7 @@ mod tests {
             client_secret: Some("csec"),
             code: "auth_code",
             code_verifier: "v",
-            redirect_uri: "http://127.0.0.1:33421/callback",
+            redirect_uri: "http://127.0.0.1:9876/callback",
         })
         .unwrap();
 
@@ -328,7 +329,7 @@ mod tests {
             client_secret: Some("csec"),
             code: "ac",
             code_verifier: "v",
-            redirect_uri: "http://127.0.0.1:33421/callback",
+            redirect_uri: "http://127.0.0.1:9876/callback",
         })
         .unwrap();
 
@@ -353,7 +354,7 @@ mod tests {
             client_secret: Some("sec"),
             code: "c",
             code_verifier: "v",
-            redirect_uri: "http://127.0.0.1:33421/callback",
+            redirect_uri: "http://127.0.0.1:9876/callback",
         })
         .unwrap();
         let cap = rx.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -372,7 +373,7 @@ mod tests {
             client_secret: None,
             code: "c",
             code_verifier: "v",
-            redirect_uri: "http://127.0.0.1:33421/callback",
+            redirect_uri: "http://127.0.0.1:9876/callback",
         })
         .unwrap();
         let cap = rx.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -405,7 +406,7 @@ mod tests {
             client_secret: Some("s"),
             code: "x",
             code_verifier: "v",
-            redirect_uri: "http://127.0.0.1:33421/callback",
+            redirect_uri: "http://127.0.0.1:9876/callback",
         })
         .unwrap_err();
         assert!(err.contains("400"));

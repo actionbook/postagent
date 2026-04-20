@@ -4,7 +4,8 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 fn contains_token_template(s: &str) -> bool {
-    regex::Regex::new(r"\$POSTAGENT\.[A-Za-z0-9_]+\.[A-Z_]+")
+    // Site slot includes `-` so hyphenated slugs (google-drive, share-point) match.
+    regex::Regex::new(r"\$POSTAGENT\.[A-Za-z0-9_-]+\.[A-Z_]+")
         .unwrap()
         .is_match(s)
 }
@@ -19,7 +20,8 @@ pub fn run(
         || headers.iter().any(|h| contains_token_template(h))
         || data.is_some_and(contains_token_template);
     if !has_token {
-        eprintln!("Missing $POSTAGENT.<SITE>.TOKEN (or API_KEY) in headers or body.\n");
+        eprintln!("Missing $POSTAGENT.<SITE>.TOKEN (or .ACCESS_TOKEN / .API_KEY) in URL, headers, or body.");
+        eprintln!("Pass the template as a literal string — do not try to fetch the token value separately.\n");
         eprintln!("Example: -H 'Authorization: Bearer $POSTAGENT.GITHUB.TOKEN'");
         std::process::exit(1);
     }

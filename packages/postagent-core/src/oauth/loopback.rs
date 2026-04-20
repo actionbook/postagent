@@ -2,7 +2,7 @@ use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::time::Duration;
 
-pub const REDIRECT_ADDR: &str = "127.0.0.1:33421";
+pub const REDIRECT_ADDR: &str = "127.0.0.1:9876";
 
 /// Result of a successful callback hit.
 #[derive(Debug, Clone)]
@@ -26,7 +26,7 @@ impl std::fmt::Display for LoopbackError {
         match self {
             LoopbackError::PortInUse => write!(
                 f,
-                "Port 33421 is in use. Another `postagent auth` may be running, or free the port."
+                "Port 9876 is in use. Another `postagent auth` may be running, or free the port."
             ),
             LoopbackError::Timeout => write!(f, "Timed out waiting for OAuth callback."),
             LoopbackError::Io(e) => write!(f, "loopback IO error: {}", e),
@@ -36,7 +36,7 @@ impl std::fmt::Display for LoopbackError {
 
 impl std::error::Error for LoopbackError {}
 
-/// Binds to `127.0.0.1:33421`, accepts one `GET /callback?...` request,
+/// Binds to `127.0.0.1:9876`, accepts one `GET /callback?...` request,
 /// returns the query-string params. Times out after `timeout`.
 pub fn listen_for_callback(timeout: Duration) -> Result<CallbackData, LoopbackError> {
     let listener = TcpListener::bind(REDIRECT_ADDR).map_err(|e| {
@@ -164,29 +164,130 @@ fn url_decode(input: &str) -> String {
 }
 
 fn success_page() -> String {
-    // Bundled offline HTML with a 3-second auto-close hint. `window.close()`
-    // only works for windows scripts opened; we still show the message either way.
+    // Self-contained offline page — no external requests so the loopback
+    // server stays isolated. The check icon is inline SVG (no network /
+    // emoji rendering variance). Auto-close attempts after 2.5s;
+    // `window.close()` only succeeds in tabs opened by JS so the copy is
+    // written to work either way.
     r#"<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>postagent: signed in</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>postagent · authorized</title>
 <style>
-  body { font-family: -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif;
-         background: #0b0d10; color: #e8eaed; margin: 0; min-height: 100vh;
-         display: flex; align-items: center; justify-content: center; }
-  .card { padding: 32px 40px; background: #11151a; border: 1px solid #232a33;
-          border-radius: 12px; text-align: center; max-width: 420px; }
-  h1 { font-size: 18px; margin: 0 0 8px; color: #a5d6ff; }
-  p { margin: 0; color: #9ba7b4; font-size: 14px; line-height: 1.5; }
+  :root {
+    --bg:       #0b0d10;
+    --bg-card:  #11151a;
+    --border:   #1f262f;
+    --fg:       #e8eaed;
+    --muted:    #8892a0;
+    --accent:   #4ade80;
+    --accent-bg:#0f2218;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg:       #f6f7f9;
+      --bg-card:  #ffffff;
+      --border:   #e4e7eb;
+      --fg:       #0b0d10;
+      --muted:    #5b6573;
+      --accent:   #16a34a;
+      --accent-bg:#dcfce7;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; height: 100%; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+                 "Helvetica Neue", Arial, sans-serif;
+    background: var(--bg);
+    color: var(--fg);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    -webkit-font-smoothing: antialiased;
+  }
+  .card {
+    max-width: 440px;
+    width: 100%;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 40px 36px 32px;
+    text-align: center;
+    animation: card-in 360ms cubic-bezier(.2,.7,.2,1) both;
+  }
+  .ring {
+    width: 72px; height: 72px;
+    border-radius: 50%;
+    background: var(--accent-bg);
+    display: flex; align-items: center; justify-content: center;
+    margin: 0 auto 20px;
+    animation: pop 400ms cubic-bezier(.2,.7,.2,1) 120ms both;
+  }
+  .ring svg { width: 36px; height: 36px; color: var(--accent); }
+  .ring svg path {
+    stroke-dasharray: 32;
+    stroke-dashoffset: 32;
+    animation: draw 420ms ease-out 260ms forwards;
+  }
+  h1 {
+    font-size: 22px;
+    font-weight: 600;
+    margin: 0 0 10px;
+    letter-spacing: -0.01em;
+  }
+  p {
+    margin: 0 0 4px;
+    color: var(--muted);
+    font-size: 14px;
+    line-height: 1.55;
+  }
+  .hint {
+    margin-top: 24px;
+    padding-top: 16px;
+    border-top: 1px solid var(--border);
+    font-size: 12px;
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+  }
+  kbd {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 11px;
+    background: var(--border);
+    padding: 2px 6px;
+    border-radius: 4px;
+    color: var(--fg);
+  }
+  @keyframes card-in {
+    from { opacity: 0; transform: translateY(6px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+  @keyframes pop {
+    from { transform: scale(.6); opacity: 0; }
+    to   { transform: scale(1);  opacity: 1; }
+  }
+  @keyframes draw {
+    to { stroke-dashoffset: 0; }
+  }
 </style>
 </head>
 <body>
-  <div class="card">
-    <h1>Signed in</h1>
+  <main class="card" role="status" aria-live="polite">
+    <div class="ring" aria-hidden="true">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M5 12.5l4.5 4.5L19 7.5"/>
+      </svg>
+    </div>
+    <h1>Authorization complete</h1>
+    <p>postagent has received your credentials.</p>
     <p>You can close this tab and return to your terminal.</p>
-  </div>
-  <script>setTimeout(function(){ try { window.close(); } catch(e) {} }, 3000);</script>
+    <div class="hint">This tab will try to close itself. If it doesn't, press <kbd>⌘W</kbd> / <kbd>Ctrl W</kbd>.</div>
+  </main>
+  <script>setTimeout(function(){ try { window.close(); } catch(e) {} }, 2500);</script>
 </body>
 </html>"#
         .to_string()

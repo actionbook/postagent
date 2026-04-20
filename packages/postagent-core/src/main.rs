@@ -54,14 +54,10 @@ fn main() {
                 eprintln!("--profile is reserved and ignored in v1");
             }
             match (site.as_deref(), action) {
-                (None, Some(AuthAction::List)) | (Some("list"), None) => commands::auth::list(),
                 (Some(s), Some(AuthAction::Logout)) => commands::auth::logout(s),
-                (Some(s), Some(AuthAction::ResetApp)) => commands::auth::reset_app(s),
+                (Some(s), Some(AuthAction::Reset)) => commands::auth::reset(s),
                 (Some(s), Some(AuthAction::Status)) => commands::auth::status(s),
-                (Some(_), Some(AuthAction::List)) => {
-                    eprintln!("Use `postagent auth list` without a site.");
-                    std::process::exit(1);
-                }
+                (Some(s), Some(AuthAction::Scopes)) => commands::auth::scopes(s),
                 (Some(s), None) => commands::auth::login(commands::auth::LoginArgs {
                     site: s,
                     token: token.as_deref(),
@@ -74,7 +70,6 @@ fn main() {
                 }),
                 (None, None) => {
                     eprintln!("Usage: postagent auth <site> [options]");
-                    eprintln!("       postagent auth list");
                     std::process::exit(1);
                 }
                 (None, Some(_)) => {

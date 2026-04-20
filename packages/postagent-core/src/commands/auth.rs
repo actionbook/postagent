@@ -65,6 +65,23 @@ fn select_method<'a>(
         return Ok(&methods[0]);
     }
 
+    // Interactive arrow-key picker when stdin is a TTY; falls back to the
+    // numbered-choice prompt for non-interactive cases (CI, piped input,
+    // Windows). Keeps both paths reachable from tests.
+    #[cfg(unix)]
+    if atty_check() {
+        match select_method_interactive(methods)? {
+            Some(idx) => return Ok(&methods[idx]),
+            None => return Err("auth cancelled".into()),
+        }
+    }
+
+    select_method_numbered(methods)
+}
+
+fn select_method_numbered<'a>(
+    methods: &'a [AuthMethod],
+) -> Result<&'a AuthMethod, Box<dyn std::error::Error>> {
     eprintln!(
         "This site supports {} authentication methods:",
         methods.len()
@@ -87,6 +104,379 @@ fn select_method<'a>(
         }
     };
     Ok(&methods[idx])
+}
+
+/// Raw-mode interactive picker. Returns `Ok(Some(idx))` on Enter,
+/// `Ok(None)` on Esc/q. Terminal state is always restored via RAII guard,
+/// even on panic.
+///
+/// Key bindings:
+///   ↑ / k            move up
+///   ↓ / j            move down
+///   Enter / Return   confirm selection
+///   Esc / q          cancel
+///   1..=9            jump to that 1-based index
+#[cfg(unix)]
+fn select_method_interactive(
+    methods: &[AuthMethod],
+) -> Result<Option<usize>, Box<dyn std::error::Error>> {
+    use std::io::Read;
+    use std::os::unix::io::AsRawFd;
+
+    let stdin = io::stdin();
+    let fd = stdin.as_raw_fd();
+
+    // Snapshot current termios so the guard can restore on exit / panic.
+    let original = unsafe {
+        let mut t: libc::termios = std::mem::zeroed();
+        libc::tcgetattr(fd, &mut t);
+        t
+    };
+
+    struct TtyGuard {
+        fd: i32,
+        original: libc::termios,
+    }
+    impl Drop for TtyGuard {
+        fn drop(&mut self) {
+            unsafe {
+                libc::tcsetattr(self.fd, libc::TCSANOW, &self.original);
+            }
+            // Show cursor in case we hid it; harmless if already visible.
+            eprint!("\x1b[?25h");
+            let _ = io::stderr().flush();
+        }
+    }
+    let _guard = TtyGuard { fd, original };
+
+    // cbreak mode: no echo, no line buffering, but signals still fire so
+    // Ctrl-C still kills the process and Drop still restores the terminal.
+    unsafe {
+        let mut t = original;
+        t.c_lflag &= !(libc::ECHO | libc::ICANON);
+        t.c_cc[libc::VMIN] = 1;
+        t.c_cc[libc::VTIME] = 0;
+        libc::tcsetattr(fd, libc::TCSANOW, &t);
+    }
+
+    eprintln!("Select an auth method:");
+    eprint!("\x1b[?25l"); // hide cursor for cleaner redraws
+
+    let n = methods.len();
+    let mut cursor = 0usize;
+    render_menu(methods, cursor);
+
+    let mut buf = [0u8; 8];
+    let result: Option<usize> = loop {
+        let nread = match stdin.lock().read(&mut buf) {
+            Ok(n) if n > 0 => n,
+            _ => break None, // EOF on stdin -> treat as cancel
+        };
+        let chunk = &buf[..nread];
+
+        // Match in priority: multi-byte escape seqs first, then single bytes.
+        let action = classify_key(chunk);
+
+        match action {
+            KeyAction::Up => {
+                if cursor > 0 {
+                    cursor -= 1;
+                }
+            }
+            KeyAction::Down => {
+                if cursor + 1 < n {
+                    cursor += 1;
+                }
+            }
+            KeyAction::Enter => break Some(cursor),
+            KeyAction::Cancel => break None,
+            KeyAction::Digit(d) => {
+                // 1-based digit → 0-based index; clamp to len.
+                if d >= 1 && d <= n {
+                    cursor = d - 1;
+                }
+            }
+            KeyAction::Unknown => {}
+        }
+        rerender_menu(methods, cursor);
+    };
+
+    // Clear the menu lines so the final screen doesn't keep the selector
+    // prefix hanging around, then fall through to print a 1-line confirmation.
+    clear_menu(n);
+    match result {
+        Some(idx) => {
+            eprintln!("  → [{}] {}", methods[idx].id(), methods[idx].label());
+        }
+        None => {
+            eprintln!("  (cancelled)");
+        }
+    }
+    Ok(result)
+}
+
+#[cfg(unix)]
+enum KeyAction {
+    Up,
+    Down,
+    Enter,
+    Cancel,
+    Digit(usize),
+    Unknown,
+}
+
+#[cfg(unix)]
+fn classify_key(chunk: &[u8]) -> KeyAction {
+    // Most terminals deliver an arrow as all three bytes (ESC `[` A/B) in
+    // one read call. We match the 3-byte form first; an ESC alone means
+    // the user pressed the Escape key.
+    if chunk.len() >= 3 && chunk[0] == 0x1b && chunk[1] == b'[' {
+        return match chunk[2] {
+            b'A' => KeyAction::Up,
+            b'B' => KeyAction::Down,
+            _ => KeyAction::Unknown,
+        };
+    }
+    if chunk.len() == 1 {
+        return match chunk[0] {
+            b'\x1b' | b'q' | b'Q' => KeyAction::Cancel,
+            b'\r' | b'\n' => KeyAction::Enter,
+            b'k' | b'K' => KeyAction::Up,
+            b'j' | b'J' => KeyAction::Down,
+            b if b.is_ascii_digit() && b != b'0' => KeyAction::Digit((b - b'0') as usize),
+            _ => KeyAction::Unknown,
+        };
+    }
+    KeyAction::Unknown
+}
+
+/// Emit one line per method. Cursor at `idx` gets a `> ` prefix; the rest
+/// get two spaces so the label columns stay aligned.
+#[cfg(unix)]
+fn render_menu(methods: &[AuthMethod], idx: usize) {
+    for (i, m) in methods.iter().enumerate() {
+        let marker = if i == idx { "> " } else { "  " };
+        // \x1b[2K clears the full line wherever the cursor sits; \r returns
+        // to column 1 before writing so partial overwrites from prior
+        // renders can't leak through.
+        eprint!("\x1b[2K\r{}[{}] {}\n", marker, m.id(), m.label());
+    }
+    let _ = io::stderr().flush();
+}
+
+/// Move the cursor back up N lines, then re-render. Must match the number
+/// of lines `render_menu` produced (one per method).
+#[cfg(unix)]
+fn rerender_menu(methods: &[AuthMethod], idx: usize) {
+    eprint!("\x1b[{}A", methods.len());
+    render_menu(methods, idx);
+}
+
+#[cfg(unix)]
+fn clear_menu(n: usize) {
+    eprint!("\x1b[{}A", n);
+    for _ in 0..n {
+        eprint!("\x1b[2K\n");
+    }
+    eprint!("\x1b[{}A", n);
+    let _ = io::stderr().flush();
+}
+
+/// Raw-mode multi-select checkbox picker for OAuth scopes. Row 0 is a
+/// "select all" toggle; rows 1..=N are one per catalog entry. Entries in
+/// `defaults` start pre-checked so Enter without changes yields the
+/// descriptor default set.
+///
+/// Returns `Ok(Some(names))` on Enter (possibly empty — treated as an
+/// explicit empty override), `Ok(None)` on Esc/q so the caller can fall
+/// back to the descriptor default.
+///
+/// Key bindings:
+///   ↑ / k            move up
+///   ↓ / j            move down
+///   Space            toggle the focused row (or toggle all from row 0)
+///   a                toggle all (independent of cursor position)
+///   Enter / Return   confirm
+///   Esc / q          cancel (fall back to defaults)
+#[cfg(unix)]
+fn select_scopes_interactive(
+    catalog: &[descriptor::ScopeCatalogEntry],
+    defaults: &std::collections::BTreeSet<String>,
+) -> Result<Option<Vec<String>>, Box<dyn std::error::Error>> {
+    use std::io::Read;
+    use std::os::unix::io::AsRawFd;
+
+    let stdin = io::stdin();
+    let fd = stdin.as_raw_fd();
+
+    let original = unsafe {
+        let mut t: libc::termios = std::mem::zeroed();
+        libc::tcgetattr(fd, &mut t);
+        t
+    };
+
+    struct TtyGuard {
+        fd: i32,
+        original: libc::termios,
+    }
+    impl Drop for TtyGuard {
+        fn drop(&mut self) {
+            unsafe {
+                libc::tcsetattr(self.fd, libc::TCSANOW, &self.original);
+            }
+            eprint!("\x1b[?25h");
+            let _ = io::stderr().flush();
+        }
+    }
+    let _guard = TtyGuard { fd, original };
+
+    unsafe {
+        let mut t = original;
+        t.c_lflag &= !(libc::ECHO | libc::ICANON);
+        t.c_cc[libc::VMIN] = 1;
+        t.c_cc[libc::VTIME] = 0;
+        libc::tcsetattr(fd, libc::TCSANOW, &t);
+    }
+
+    let mut selected: Vec<bool> = catalog
+        .iter()
+        .map(|e| defaults.contains(&e.name))
+        .collect();
+
+    eprintln!("Select OAuth scopes (↑/↓ move, Space toggle, a = all, Enter confirm, Esc cancel):");
+    eprintln!("  Defaults are pre-selected; the first row toggles every scope at once.");
+    eprint!("\x1b[?25l");
+
+    let rows = catalog.len() + 1; // +1 for the "select all" row
+    let mut cursor = 0usize;
+    render_scope_menu(catalog, &selected, cursor);
+
+    let mut buf = [0u8; 8];
+    let confirmed = loop {
+        let nread = match stdin.lock().read(&mut buf) {
+            Ok(n) if n > 0 => n,
+            _ => break false, // EOF -> treat as cancel
+        };
+        let chunk = &buf[..nread];
+
+        let mut moved = false;
+        if chunk.len() >= 3 && chunk[0] == 0x1b && chunk[1] == b'[' {
+            match chunk[2] {
+                b'A' => {
+                    cursor = cursor.saturating_sub(1);
+                    moved = true;
+                }
+                b'B' => {
+                    if cursor + 1 < rows {
+                        cursor += 1;
+                        moved = true;
+                    }
+                }
+                _ => {}
+            }
+        } else if chunk.len() == 1 {
+            match chunk[0] {
+                b'\x1b' | b'q' | b'Q' => break false,
+                b'\r' | b'\n' => break true,
+                b'k' | b'K' => {
+                    cursor = cursor.saturating_sub(1);
+                    moved = true;
+                }
+                b'j' | b'J' => {
+                    if cursor + 1 < rows {
+                        cursor += 1;
+                        moved = true;
+                    }
+                }
+                b' ' => {
+                    if cursor == 0 {
+                        toggle_all(&mut selected);
+                    } else {
+                        let i = cursor - 1;
+                        selected[i] = !selected[i];
+                    }
+                    moved = true;
+                }
+                b'a' | b'A' => {
+                    toggle_all(&mut selected);
+                    moved = true;
+                }
+                _ => {}
+            }
+        }
+
+        if moved {
+            rerender_scope_menu(rows, catalog, &selected, cursor);
+        }
+    };
+
+    clear_menu(rows);
+
+    if !confirmed {
+        eprintln!("  (cancelled — falling back to default scopes)");
+        return Ok(None);
+    }
+
+    let chosen: Vec<String> = catalog
+        .iter()
+        .zip(selected.iter())
+        .filter_map(|(e, s)| if *s { Some(e.name.clone()) } else { None })
+        .collect();
+
+    eprintln!(
+        "  → {} scope{} selected",
+        chosen.len(),
+        if chosen.len() == 1 { "" } else { "s" }
+    );
+    Ok(Some(chosen))
+}
+
+#[cfg(unix)]
+fn toggle_all(selected: &mut [bool]) {
+    let all_on = selected.iter().all(|s| *s);
+    let new_state = !all_on;
+    for s in selected.iter_mut() {
+        *s = new_state;
+    }
+}
+
+#[cfg(unix)]
+fn render_scope_menu(
+    catalog: &[descriptor::ScopeCatalogEntry],
+    selected: &[bool],
+    cursor: usize,
+) {
+    let all_on = selected.iter().all(|s| *s);
+    let arrow = if cursor == 0 { "> " } else { "  " };
+    let mark = if all_on { "✓" } else { " " };
+    eprint!("\x1b[2K\r{}[{}] (select all)\n", arrow, mark);
+
+    let name_w = catalog.iter().map(|e| e.name.len()).max().unwrap_or(0);
+    for (i, entry) in catalog.iter().enumerate() {
+        let arrow = if cursor == i + 1 { "> " } else { "  " };
+        let mark = if selected[i] { "✓" } else { " " };
+        let desc = entry.description.as_deref().unwrap_or("—");
+        eprint!(
+            "\x1b[2K\r{}[{}] {:<nw$}  {}\n",
+            arrow,
+            mark,
+            entry.name,
+            desc,
+            nw = name_w
+        );
+    }
+    let _ = io::stderr().flush();
+}
+
+#[cfg(unix)]
+fn rerender_scope_menu(
+    rows: usize,
+    catalog: &[descriptor::ScopeCatalogEntry],
+    selected: &[bool],
+    cursor: usize,
+) {
+    eprint!("\x1b[{}A", rows);
+    render_scope_menu(catalog, selected, cursor);
 }
 
 fn handle_static(
@@ -202,11 +592,36 @@ fn handle_oauth2(
     };
     token::save_app(site, &app)?;
 
-    let scopes_override = if args.scopes.is_empty() {
+    // Resolve the scope set, in priority order:
+    //   1. --scope flags on the CLI (explicit override, highest priority)
+    //   2. Interactive checkbox picker (TTY only, and only when the
+    //      descriptor publishes a catalog to pick from)
+    //   3. Descriptor default (scopes_override = None)
+    let mut scopes_override: Option<Vec<String>> = if args.scopes.is_empty() {
         None
     } else {
         Some(args.scopes.to_vec())
     };
+
+    #[cfg(unix)]
+    if scopes_override.is_none() && atty_check() {
+        if let Some(catalog) = method.scopes.catalog.as_ref() {
+            if !catalog.is_empty() {
+                let defaults: std::collections::BTreeSet<String> =
+                    method.scopes.default.iter().cloned().collect();
+                if let Some(picked) = select_scopes_interactive(catalog, &defaults)? {
+                    scopes_override = Some(picked);
+                }
+                // Esc / cancel → fall through with scopes_override = None so
+                // the descriptor default applies. Kill with Ctrl-C to abort.
+            }
+        }
+    }
+
+    // Surface the effective scope set before the browser flow so the caller
+    // (human or AI agent) can catch wrong-scope situations before granting
+    // consent. The default set is easy to miss when --scope is omitted.
+    print_scope_notice(site, method, scopes_override.as_deref());
 
     let params = oauth::AuthParams {
         client_id: &client_id,
@@ -242,6 +657,45 @@ fn handle_oauth2(
         site, token_var
     );
     Ok(())
+}
+
+fn print_scope_notice(
+    site: &str,
+    method: &descriptor::OAuth2AuthMethod,
+    override_scopes: Option<&[String]>,
+) {
+    let (effective, is_override) = match override_scopes {
+        Some(s) => (s.to_vec(), true),
+        None => (method.scopes.default.clone(), false),
+    };
+
+    eprintln!();
+    if effective.is_empty() {
+        eprintln!("OAuth scopes: (none declared — provider default will apply)");
+    } else {
+        eprintln!(
+            "OAuth scopes ({}): {}",
+            if is_override { "override" } else { "default" },
+            effective.join(&method.scopes.separator),
+        );
+    }
+
+    if is_override {
+        eprintln!(
+            "  Note: --scope REPLACES the default set — double-check nothing required is missing."
+        );
+    } else {
+        eprintln!(
+            "  This is the default request. If you need different permissions, Ctrl-C and re-run with --scope <name> [<name> ...]."
+        );
+        if method.scopes.catalog.is_some() {
+            eprintln!(
+                "  Full scope catalog: postagent auth {} scopes",
+                site.to_lowercase()
+            );
+        }
+    }
+    eprintln!();
 }
 
 fn collect_placeholders(
@@ -295,13 +749,190 @@ pub fn logout(site: &str) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-pub fn reset_app(site: &str) -> Result<(), Box<dyn std::error::Error>> {
-    token::reset_app(&site.to_lowercase())?;
+pub fn reset(site: &str) -> Result<(), Box<dyn std::error::Error>> {
+    token::reset(&site.to_lowercase())?;
     println!(
         "Cleared OAuth app + tokens for {}. Run `postagent auth {}` to re-register.",
         site.to_lowercase(),
         site.to_lowercase()
     );
+    Ok(())
+}
+
+/// Lists the OAuth scope catalog for a site (from the server descriptor).
+///
+/// Users run this to discover which `--scope X` values they can pass when
+/// they want to escalate beyond the default set. Renders one method per
+/// OAuth2 method on the site (usually one); static methods are skipped.
+///
+/// Failure modes:
+///   - Site has no OAuth2 methods → friendly message, exit 0
+///   - OAuth2 method exists but no `scopes.catalog` field populated → tell
+///     the user the registry hasn't captured the full scope list yet and
+///     point them at `setup_url` to read provider docs directly. This
+///     matches the "paste-only fallback" philosophy elsewhere: never a
+///     dead end, always give them a next step.
+pub fn scopes(site: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let site_lower = site.to_lowercase();
+    let methods = crate::commands::manual::fetch_site_auth_methods(&site_lower)?
+        .unwrap_or_default();
+
+    let oauth_methods: Vec<&descriptor::OAuth2AuthMethod> = methods
+        .iter()
+        .filter_map(|m| match m {
+            descriptor::AuthMethod::Oauth2(o) => Some(o),
+            _ => None,
+        })
+        .collect();
+
+    if oauth_methods.is_empty() {
+        println!(
+            "{}: no OAuth methods declared. Scopes only apply to OAuth 2.0 flows.",
+            site_lower
+        );
+        return Ok(());
+    }
+
+    // Load local auth state so we can mark what's currently GRANTED (from
+    // the token endpoint's echoed `scope` field) rather than just what the
+    // descriptor's `default` would request. Users who re-auth with a wider
+    // scope set need to see their new grants reflected here.
+    let local_auth = token::load_auth(&site_lower);
+
+    for (i, method) in oauth_methods.iter().enumerate() {
+        if i > 0 {
+            println!();
+        }
+        println!("=== {} / {} (oauth2)", site_lower, method.id);
+
+        // Decide whether to mark "GRANTED" (actual, from saved auth.yaml)
+        // or "DEFAULT" (hypothetical, from descriptor). Granted wins only
+        // when the saved credentials are for THIS method and were obtained
+        // via the OAuth flow (i.e. the token endpoint returned a scope
+        // string). Anything else falls back to default — `--token` saves
+        // and static methods never carry a scope field.
+        let granted: Option<Vec<String>> = local_auth
+            .as_ref()
+            .filter(|a| {
+                a.effective_kind() == AuthKind::Oauth2
+                    && a.effective_method_id() == method.id
+            })
+            .and_then(|a| a.scope.clone())
+            .map(|s| {
+                let sep = method.scopes.separator.as_str();
+                s.split(sep)
+                    .map(|x| x.trim().to_string())
+                    .filter(|x| !x.is_empty())
+                    .collect()
+            });
+
+        let (marker_set, marker_label): (std::collections::BTreeSet<String>, &str) =
+            match &granted {
+                Some(g) => (g.iter().cloned().collect(), "GRANTED"),
+                None => (
+                    method.scopes.default.iter().cloned().collect(),
+                    "DEFAULT",
+                ),
+            };
+
+        // One-line status header so users know which column they're looking
+        // at without reading the legend at the bottom.
+        match &granted {
+            Some(g) => println!(
+                "  Status: authenticated — {} scope(s) currently granted",
+                g.len()
+            ),
+            None => println!("  Status: not authenticated (showing default scope request)"),
+        }
+
+        match method.scopes.catalog.as_ref() {
+            Some(catalog) if !catalog.is_empty() => {
+                let name_w = catalog
+                    .iter()
+                    .map(|e| e.name.len())
+                    .max()
+                    .unwrap_or(0)
+                    .max(marker_label.len());
+                println!(
+                    "  {:<3} {:<nw$}  {}",
+                    marker_label.chars().next().map(|_| "").unwrap_or(""),
+                    "SCOPE",
+                    "DESCRIPTION",
+                    nw = name_w
+                );
+                for entry in catalog {
+                    let marker = if marker_set.contains(&entry.name) {
+                        "✓"
+                    } else {
+                        " "
+                    };
+                    let desc = entry.description.as_deref().unwrap_or("—");
+                    println!(
+                        "  {:<3} {:<nw$}  {}",
+                        marker,
+                        entry.name,
+                        desc,
+                        nw = name_w
+                    );
+                }
+
+                // If the provider returned scopes we don't have in the
+                // catalog, surface them so users / maintainers notice the
+                // drift. Otherwise they'd silently disappear from the
+                // table even though they're technically usable.
+                if let Some(g) = &granted {
+                    let catalog_names: std::collections::BTreeSet<&str> =
+                        catalog.iter().map(|e| e.name.as_str()).collect();
+                    let orphan: Vec<&String> =
+                        g.iter().filter(|s| !catalog_names.contains(s.as_str())).collect();
+                    if !orphan.is_empty() {
+                        println!();
+                        println!("  ! Granted but missing from catalog (spec author should update):");
+                        for s in orphan {
+                            println!("    ✓   {}", s);
+                        }
+                    }
+                }
+
+                println!();
+                match &granted {
+                    Some(_) => println!(
+                        "  ✓ = currently granted to your saved credentials"
+                    ),
+                    None => println!("  ✓ = included in default scope request"),
+                }
+                println!("  Escalate with: postagent auth {} --scope <name> [...]", site_lower);
+                println!(
+                    "  Note: --scope OVERRIDES the default set; re-list any defaults you want to keep."
+                );
+            }
+            _ => {
+                println!("  No scope catalog is published for this method yet.");
+                if let Some(url) = method.setup_url.as_deref() {
+                    println!("  Refer to provider docs: {}", url);
+                }
+                match &granted {
+                    Some(g) => println!(
+                        "  Currently granted: {}",
+                        if g.is_empty() {
+                            "(none)".to_string()
+                        } else {
+                            g.join(method.scopes.separator.as_str())
+                        }
+                    ),
+                    None => println!(
+                        "  Defaults requested: {}",
+                        if method.scopes.default.is_empty() {
+                            "(none)".to_string()
+                        } else {
+                            method.scopes.default.join(method.scopes.separator.as_str())
+                        }
+                    ),
+                }
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -320,7 +951,24 @@ pub fn status(site: &str) -> Result<(), Box<dyn std::error::Error>> {
         println!("  kind:       {:?}", a.effective_kind());
         println!("  method_id:  {}", a.effective_method_id());
         if let Some(scope) = &a.scope {
-            println!("  scope:      {}", scope);
+            // Providers return the granted scope string joined by their own
+            // separator (space for Google/GitHub, comma for Figma). For
+            // readability we split on both and print one per line so long
+            // Google-style URLs don't wrap unpredictably in narrow terminals.
+            let items: Vec<&str> = scope
+                .split(|c: char| c.is_whitespace() || c == ',')
+                .filter(|s| !s.is_empty())
+                .collect();
+            match items.as_slice() {
+                [] => println!("  scope:      {}", scope),
+                [one] => println!("  scope:      {}", one),
+                [first, rest @ ..] => {
+                    println!("  scope:      {}", first);
+                    for s in rest {
+                        println!("              {}", s);
+                    }
+                }
+            }
         }
         if let Some(exp) = &a.expires_at {
             println!("  expires_at: {}", exp);
@@ -342,34 +990,12 @@ pub fn status(site: &str) -> Result<(), Box<dyn std::error::Error>> {
                 let current = descriptor::descriptor_hash(m);
                 if current != app.descriptor_hash {
                     println!(
-                        "  warning:    stale app config (descriptor changed); run `postagent auth {} reset-app`",
+                        "  warning:    stale app config (descriptor changed); run `postagent auth {} reset`",
                         site
                     );
                 }
             }
         }
-    }
-    Ok(())
-}
-
-pub fn list() -> Result<(), Box<dyn std::error::Error>> {
-    let sites = token::list_sites();
-    if sites.is_empty() {
-        println!("No credentials saved.");
-        return Ok(());
-    }
-    for site in sites {
-        let auth = token::load_auth(&site);
-        let kind = match auth.as_ref().map(|a| a.effective_kind()) {
-            Some(AuthKind::Static) => "static",
-            Some(AuthKind::Oauth2) => "oauth2",
-            None => "app-only",
-        };
-        let method = auth
-            .as_ref()
-            .map(|a| a.effective_method_id().to_string())
-            .unwrap_or_else(|| "-".into());
-        println!("  {}  {}  method={}", site, kind, method);
     }
     Ok(())
 }
@@ -482,4 +1108,47 @@ fn read_secret_tty() -> Result<String, Box<dyn std::error::Error>> {
 #[cfg(windows)]
 fn read_secret_tty() -> Result<String, Box<dyn std::error::Error>> {
     read_secret_pipe()
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classify_arrow_up_and_down() {
+        assert!(matches!(classify_key(b"\x1b[A"), KeyAction::Up));
+        assert!(matches!(classify_key(b"\x1b[B"), KeyAction::Down));
+    }
+
+    #[test]
+    fn classify_vim_bindings() {
+        assert!(matches!(classify_key(b"k"), KeyAction::Up));
+        assert!(matches!(classify_key(b"j"), KeyAction::Down));
+        assert!(matches!(classify_key(b"K"), KeyAction::Up));
+        assert!(matches!(classify_key(b"J"), KeyAction::Down));
+    }
+
+    #[test]
+    fn classify_enter_and_cancel() {
+        assert!(matches!(classify_key(b"\r"), KeyAction::Enter));
+        assert!(matches!(classify_key(b"\n"), KeyAction::Enter));
+        assert!(matches!(classify_key(b"\x1b"), KeyAction::Cancel));
+        assert!(matches!(classify_key(b"q"), KeyAction::Cancel));
+        assert!(matches!(classify_key(b"Q"), KeyAction::Cancel));
+    }
+
+    #[test]
+    fn classify_digits_are_1_indexed() {
+        // `0` is NOT a selector digit — menu indices are 1-based.
+        assert!(matches!(classify_key(b"0"), KeyAction::Unknown));
+        assert!(matches!(classify_key(b"1"), KeyAction::Digit(1)));
+        assert!(matches!(classify_key(b"9"), KeyAction::Digit(9)));
+    }
+
+    #[test]
+    fn classify_ignores_noise() {
+        assert!(matches!(classify_key(b""), KeyAction::Unknown));
+        assert!(matches!(classify_key(b"x"), KeyAction::Unknown));
+        assert!(matches!(classify_key(b"\x1b[Z"), KeyAction::Unknown)); // Shift+Tab
+    }
 }

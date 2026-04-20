@@ -57,6 +57,11 @@ pub struct StaticAuthMethod {
     #[serde(rename = "in")]
     pub location: String,
     pub name: String,
+    /// Optional value template. Supports `{{token}}` placeholder. Defaults to
+    /// `{{token}}` when absent, which bearer schemes render as `Bearer {{token}}`.
+    /// Use for providers with non-standard prefixes, e.g. Discord: `Bot {{token}}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_template: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -73,7 +78,9 @@ pub struct OAuth2AuthMethod {
     pub token: TokenSpec,
     pub scopes: ScopesSpec,
     pub refresh: RefreshSpec,
-    pub inject: InjectSpec,
+    /// Non-empty list of injection points. The CLI applies every entry on
+    /// each outbound request. See InjectSpec for placeholder semantics.
+    pub injects: Vec<InjectSpec>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -124,6 +131,18 @@ pub struct ScopesSpec {
     pub buckets: Option<BTreeMap<String, ScopeBucket>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refresh_magic_scope: Option<String>,
+    /// Full catalog of scopes the provider publishes. Listed by
+    /// `postagent auth <site> scopes` so users can escalate without
+    /// leaving the CLI to re-read provider docs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog: Option<Vec<ScopeCatalogEntry>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScopeCatalogEntry {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -139,11 +158,15 @@ pub struct RefreshSpec {
     pub expiry_instructions: Option<String>,
 }
 
+/// Where and how to attach the access token on outbound requests. See
+/// `docs/design/oauth.md §3.2a` for placeholder contract.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InjectSpec {
     #[serde(rename = "in")]
     pub location: String,
     pub name: String,
+    /// Supports `{{access_token}}` (runtime token) and `{{<extras_key>}}`
+    /// (values from `response_map.extras`).
     pub value_template: String,
 }
 
@@ -203,11 +226,11 @@ mod tests {
             },
             "scopes": { "default": [], "separator": " " },
             "refresh": { "behavior": "none" },
-            "inject": {
+            "injects": [{
                 "in": "header",
                 "name": "Authorization",
-                "value_template": "Bearer {access_token}"
-            }
+                "value_template": "Bearer {{access_token}}"
+            }]
         });
         let method: AuthMethod = serde_json::from_value(raw).unwrap();
         match method {
@@ -215,7 +238,40 @@ mod tests {
                 assert_eq!(m.id, "oauth");
                 assert_eq!(m.client.client_type, "confidential");
                 assert_eq!(m.token.body_encoding, "json");
-                assert_eq!(m.inject.value_template, "Bearer {access_token}");
+                assert_eq!(m.injects.len(), 1);
+                assert_eq!(m.injects[0].value_template, "Bearer {{access_token}}");
+            }
+            _ => panic!("expected Oauth2"),
+        }
+    }
+
+    #[test]
+    fn parse_oauth2_multi_inject() {
+        let raw = json!({
+            "kind": "oauth2",
+            "id": "oauth",
+            "label": "OAuth",
+            "grants": ["authorization_code"],
+            "client": { "type": "public" },
+            "authorize": { "url": "https://example.com/auth" },
+            "token": {
+                "url": "https://example.com/token",
+                "body_encoding": "form",
+                "client_auth": "either",
+                "response_map": { "access_token": "/access_token" }
+            },
+            "scopes": { "default": [], "separator": " " },
+            "refresh": { "behavior": "reusable" },
+            "injects": [
+                { "in": "header", "name": "Authorization", "value_template": "Bearer {{access_token}}" },
+                { "in": "header", "name": "X-Workspace-Id", "value_template": "{{workspace_id}}" }
+            ]
+        });
+        let method: AuthMethod = serde_json::from_value(raw).unwrap();
+        match method {
+            AuthMethod::Oauth2(m) => {
+                assert_eq!(m.injects.len(), 2);
+                assert_eq!(m.injects[1].name, "X-Workspace-Id");
             }
             _ => panic!("expected Oauth2"),
         }

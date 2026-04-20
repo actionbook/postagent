@@ -242,10 +242,10 @@ mod tests {
     fn redirect_uri_substitution() {
         let out = render_with(
             "callback: {{redirect_uri}}\n",
-            "http://127.0.0.1:33421/callback",
+            "http://127.0.0.1:9876/callback",
             false,
         );
-        assert!(out.contains("http://127.0.0.1:33421/callback"));
+        assert!(out.contains("http://127.0.0.1:9876/callback"));
         assert!(!out.contains("{{redirect_uri}}"));
     }
 
@@ -257,9 +257,9 @@ mod tests {
 
     #[test]
     fn golden_notion_instructions() {
-        let src = "### 创建 Notion Public 集成\n\n1. 打开 [Notion 集成管理](https://www.notion.so/my-integrations)\n2. 点击 **New integration**\n3. 填入回调：\n\n   ```\n   {{redirect_uri}}\n   ```\n\n4. 保存\n";
-        let out = render_with(src, "http://127.0.0.1:33421/callback", false);
-        let expected = "创建 Notion Public 集成\n\n1. 打开 Notion 集成管理 (https://www.notion.so/my-integrations)\n2. 点击 New integration\n3. 填入回调：\n\n       http://127.0.0.1:33421/callback\n\n4. 保存\n";
+        let src = "### Create a Notion public integration\n\n1. Open [Notion integrations](https://www.notion.so/my-integrations)\n2. Click **New integration**\n3. Set the redirect URI:\n\n   ```\n   {{redirect_uri}}\n   ```\n\n4. Save\n";
+        let out = render_with(src, "http://127.0.0.1:9876/callback", false);
+        let expected = "Create a Notion public integration\n\n1. Open Notion integrations (https://www.notion.so/my-integrations)\n2. Click New integration\n3. Set the redirect URI:\n\n       http://127.0.0.1:9876/callback\n\n4. Save\n";
         assert_eq!(out, expected);
     }
 }

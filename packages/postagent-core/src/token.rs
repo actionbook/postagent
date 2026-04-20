@@ -113,35 +113,13 @@ pub fn logout(site: &str) -> Result<(), Box<dyn std::error::Error>> {
     logout_in(&home(), site)
 }
 
-pub fn reset_app(site: &str) -> Result<(), Box<dyn std::error::Error>> {
-    reset_app_in(&home(), site)
+pub fn reset(site: &str) -> Result<(), Box<dyn std::error::Error>> {
+    reset_in(&home(), site)
 }
 
 #[allow(dead_code)]
 pub fn site_dir_exists(site: &str) -> bool {
     token_dir_with_base(&home(), site).exists()
-}
-
-pub fn list_sites() -> Vec<String> {
-    let base = home();
-    let dir = base.join(".postagent").join("profiles").join(DEFAULT_PROFILE);
-    let Ok(entries) = fs::read_dir(&dir) else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        if path.join("auth.yaml").exists() || path.join("app.yaml").exists() {
-            if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
-                out.push(name.to_string());
-            }
-        }
-    }
-    out.sort();
-    out
 }
 
 // ---------- Legacy compat ----------
@@ -172,9 +150,14 @@ pub fn resolve_template_variables(input: &str) -> Result<String, String> {
 }
 
 fn resolve_template_variables_with_base(base: &Path, input: &str) -> Result<String, String> {
+    // Site slot allows letters, digits, underscore, AND hyphen — site slugs
+    // in the registry are hyphenated (e.g. `google-drive`, `share-point`).
+    // The sub-field after EXTRAS uses the narrower set: extras names are
+    // user-chosen identifiers (`bot_id`, `workspace_id`) without hyphens.
+
     // Reject REFRESH_TOKEN at lex stage to prevent accidental leakage into
     // request bodies / URLs.
-    let refuse = Regex::new(r"\$POSTAGENT\.[A-Za-z0-9_]+\.REFRESH_TOKEN\b").unwrap();
+    let refuse = Regex::new(r"\$POSTAGENT\.[A-Za-z0-9_-]+\.REFRESH_TOKEN\b").unwrap();
     if refuse.is_match(input) {
         return Err(
             "$POSTAGENT.<SITE>.REFRESH_TOKEN is not a usable template; refresh tokens are \
@@ -183,7 +166,7 @@ fn resolve_template_variables_with_base(base: &Path, input: &str) -> Result<Stri
         );
     }
 
-    let re = Regex::new(r"\$POSTAGENT\.([A-Za-z0-9_]+)\.([A-Z_]+)(?:\.([A-Za-z0-9_]+))?").unwrap();
+    let re = Regex::new(r"\$POSTAGENT\.([A-Za-z0-9_-]+)\.([A-Z_]+)(?:\.([A-Za-z0-9_]+))?").unwrap();
     let mut result = input.to_string();
     for cap in re.captures_iter(input) {
         let site = cap[1].to_lowercase();
@@ -277,7 +260,7 @@ fn resolve_one(
 /// Returns site names referenced by `$POSTAGENT.<SITE>.TOKEN|ACCESS_TOKEN|API_KEY`
 /// in any of the provided strings. Used by `send` to build the expired-token hint.
 pub fn referenced_sites(inputs: &[&str]) -> Vec<String> {
-    let re = Regex::new(r"\$POSTAGENT\.([A-Za-z0-9_]+)\.(TOKEN|ACCESS_TOKEN|API_KEY)\b").unwrap();
+    let re = Regex::new(r"\$POSTAGENT\.([A-Za-z0-9_-]+)\.(TOKEN|ACCESS_TOKEN|API_KEY)\b").unwrap();
     let mut seen: Vec<String> = Vec::new();
     for s in inputs {
         for cap in re.captures_iter(s) {
@@ -332,7 +315,7 @@ fn logout_in(base: &Path, site: &str) -> Result<(), Box<dyn std::error::Error>> 
     Ok(())
 }
 
-fn reset_app_in(base: &Path, site: &str) -> Result<(), Box<dyn std::error::Error>> {
+fn reset_in(base: &Path, site: &str) -> Result<(), Box<dyn std::error::Error>> {
     for f in [auth_file(base, site), app_file(base, site)] {
         if f.exists() {
             fs::remove_file(&f)?;
@@ -562,7 +545,7 @@ mod tests {
     }
 
     #[test]
-    fn reset_app_removes_both() {
+    fn reset_removes_both() {
         let tmp = TempDir::new().unwrap();
         let base = tmp.path();
 
@@ -581,7 +564,7 @@ mod tests {
         )
         .unwrap();
 
-        reset_app_in(base, "s").unwrap();
+        reset_in(base, "s").unwrap();
         assert!(load_auth_from(base, "s").is_none());
         assert!(load_app_from(base, "s").is_none());
     }
@@ -600,6 +583,24 @@ mod tests {
         )
         .unwrap();
         assert_eq!(out, "ghp / sk");
+    }
+
+    #[test]
+    fn resolve_hyphenated_site_slug() {
+        // Hyphenated slugs (google-drive, share-point) were previously
+        // rejected by the template regex — the send command would silently
+        // fall through to "Missing $POSTAGENT template" instead of looking
+        // the site up. Lock in that they now resolve correctly.
+        let tmp = TempDir::new().unwrap();
+        let base = tmp.path();
+        write_raw(base, "google-drive", "api_key: gd-secret\n");
+
+        let out = resolve_template_variables_with_base(
+            base,
+            "Authorization: Bearer $POSTAGENT.GOOGLE-DRIVE.API_KEY",
+        )
+        .unwrap();
+        assert_eq!(out, "Authorization: Bearer gd-secret");
     }
 
     #[test]

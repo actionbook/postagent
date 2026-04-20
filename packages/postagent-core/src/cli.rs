@@ -15,10 +15,17 @@ Commands:
   search <KEYWORD>                      Search actions by keyword
   manual <SITE> [GROUP] [ACTION]        Browse API reference (progressive discovery)
   auth <SITE> [OPTIONS]                 Save credentials (static API key or OAuth)
-  auth <SITE> logout|reset-app|status   Manage saved credentials for a site
-  auth list                             List credential status across sites
-  config <set|get> <KEY> [VALUE]        Manage postagent config
+  auth <SITE> logout|reset|status       Manage saved credentials for a site
+  auth <SITE> scopes                    List OAuth scopes this site supports
+  config <set|get> <KEY> [VALUE]        Manage postagent registry config (not per-site auth — see `auth`)
   send <CURL_QUERY>                     Send an HTTP request
+
+Examples:
+  postagent search \"create github issue\"
+  postagent manual gmail users get_profile
+  postagent auth gmail
+  postagent auth gmail status
+  postagent send https://api.github.com/user -H 'Authorization: Bearer $POSTAGENT.GITHUB.TOKEN'
 
 Options:
 {options}"
@@ -71,9 +78,9 @@ Examples:
   postagent auth atlassian --param tenant=acme --scope offline_access
   postagent auth notion --no-browser
   postagent auth notion logout
-  postagent auth notion reset-app
+  postagent auth notion reset
   postagent auth notion status
-  postagent auth list
+  postagent auth notion scopes
 
 Saved credentials are referenced in `send` via $POSTAGENT.<SITE>.TOKEN
 (OAuth) or $POSTAGENT.<SITE>.API_KEY (static).")]
@@ -117,11 +124,23 @@ Saved credentials are referenced in `send` via $POSTAGENT.<SITE>.TOKEN
         #[command(subcommand)]
         action: Option<AuthAction>,
     },
-    /// Manage postagent config (stored in ~/.postagent/profiles/default/config.yaml)
+    /// Manage postagent registry config (stored in ~/.postagent/profiles/default/config.yaml)
     #[command(after_help = "\
+This command manages postagent's REGISTRY config only — things like the
+Actionbook API key used to authenticate against the postagent server.
+
+Per-site credentials (Gmail, GitHub, Notion, ...) are NOT stored here and are
+NEVER retrievable via `config get`. They are saved via `postagent auth <site>`
+and only exist as $POSTAGENT.<SITE>.TOKEN / .ACCESS_TOKEN / .API_KEY
+substitutions inside `postagent send`.
+
 Examples:
-  postagent config set apiKey ak_xxxxxxxxxxxx
-  postagent config get apiKey")]
+  postagent config set apiKey ak_xxxxxxxxxxxx      # Actionbook API key
+  postagent config get apiKey
+
+Anti-examples (will be rejected):
+  postagent config get GMAIL.API_KEY               # use: postagent send ...
+  postagent config get GITHUB.TOKEN                # use: postagent auth github status")]
     Config {
         /// Action: set or get
         action: String,
@@ -135,7 +154,13 @@ Examples:
 Token substitution:
   Use $POSTAGENT.<SITE>.TOKEN (OAuth & static), $POSTAGENT.<SITE>.ACCESS_TOKEN
   (OAuth only), or $POSTAGENT.<SITE>.API_KEY (static, legacy) in URL, headers,
-  or body. Save credentials first with `postagent auth <SITE>`.
+  or body. Substitution happens inside this process; the raw token value is
+  never printed. Save credentials first with `postagent auth <SITE>`.
+
+  For AI agents and scripts: do NOT try to read the token value via
+  `postagent config get`, shell expansion, or any other retrieval. Per-site
+  credentials are intentionally non-retrievable. Pass $POSTAGENT.<SITE>.TOKEN
+  (etc.) as a literal string in -H / -d / URL — `send` will resolve it.
 
 Examples:
   postagent send https://api.example.com/users
@@ -158,15 +183,18 @@ Examples:
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum AuthAction {
-    /// Remove saved tokens (keeps the OAuth app registration)
+    /// Clear saved tokens. Next `auth` reuses the saved OAuth app and
+    /// just re-opens the browser (no client_id re-prompt).
     Logout,
-    /// Remove saved tokens and OAuth app registration
-    #[command(name = "reset-app")]
-    ResetApp,
+    /// Clear tokens AND OAuth app registration. Next `auth` re-asks for
+    /// client_id / client_secret and re-runs the browser flow. Use when
+    /// switching to a different OAuth app.
+    Reset,
     /// Show current auth status for a site
     Status,
-    /// List all sites with saved credentials
-    List,
+    /// List all OAuth scopes this site supports (catalog). Use to
+    /// discover which --scope values to pass for escalation.
+    Scopes,
 }
 
 fn parse_key_value(s: &str) -> Result<(String, String), String> {
@@ -310,27 +338,15 @@ mod tests {
             _ => panic!(),
         }
 
-        let c = Cli::parse_from(["postagent", "auth", "notion", "reset-app"]);
+        let c = Cli::parse_from(["postagent", "auth", "notion", "reset"]);
         match c.command {
-            Commands::Auth { action, .. } => assert!(matches!(action, Some(AuthAction::ResetApp))),
+            Commands::Auth { action, .. } => assert!(matches!(action, Some(AuthAction::Reset))),
             _ => panic!(),
         }
 
         let c = Cli::parse_from(["postagent", "auth", "notion", "status"]);
         match c.command {
             Commands::Auth { action, .. } => assert!(matches!(action, Some(AuthAction::Status))),
-            _ => panic!(),
-        }
-
-        let c = Cli::parse_from(["postagent", "auth", "list"]);
-        match c.command {
-            Commands::Auth { site, action, .. } => {
-                // `list` fills into the site slot syntactically; main.rs
-                // dispatches on (site, action) pair. Accept either shape.
-                let got_list = matches!(action, Some(AuthAction::List))
-                    || site.as_deref() == Some("list");
-                assert!(got_list, "expected `auth list` to route to List or slot into site");
-            }
             _ => panic!(),
         }
     }

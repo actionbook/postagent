@@ -1,8 +1,65 @@
+use regex::Regex;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 const DEFAULT_PROFILE: &str = "default";
+
+/// Detects config keys that look like `postagent send` template tokens,
+/// e.g. `GMAIL.API_KEY`, `GITHUB.TOKEN`, `NOTION.EXTRAS.WORKSPACE_ID`.
+///
+/// LLM-agent callers frequently confuse the two namespaces — the help text
+/// mentions both `postagent config get apiKey` (registry config) and
+/// `$POSTAGENT.<SITE>.API_KEY` (send-time template), and agents splice them
+/// into `postagent config get GMAIL.API_KEY`. This command can never
+/// succeed by design (per-site credentials are non-retrievable), so we
+/// reject the shape up front with a pointer to the right tool.
+fn template_shaped_key_pattern() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"^(?P<site>[A-Za-z0-9_-]+)\.(?P<field>API_KEY|TOKEN|ACCESS_TOKEN|REFRESH_TOKEN|EXTRAS)(\.[A-Za-z0-9_]+)?$")
+            .unwrap()
+    })
+}
+
+/// Returns `Err(message)` when `key` looks like a `$POSTAGENT.<SITE>.*`
+/// template reference rather than a real config key. The message explains
+/// the distinction and points to the correct command, so an LLM agent
+/// reading stderr can self-correct.
+fn reject_if_template_shaped(action: &str, key: &str) -> Result<(), String> {
+    let caps = match template_shaped_key_pattern().captures(key) {
+        Some(c) => c,
+        None => return Ok(()),
+    };
+    let site_upper = caps.name("site").unwrap().as_str().to_uppercase();
+    let site_lower = site_upper.to_lowercase();
+    let field = caps.name("field").unwrap().as_str();
+    // Always recommend `.TOKEN` as the universal form — it dispatches on auth
+    // kind (static api_key or OAuth access_token) and works regardless of how
+    // the site was authenticated. EXTRAS is the one case where we must echo
+    // back the specific sub-field, since there's no universal alternative.
+    let template = if field == "EXTRAS" {
+        format!("$POSTAGENT.{}.EXTRAS.<NAME>", site_upper)
+    } else {
+        format!("$POSTAGENT.{}.TOKEN", site_upper)
+    };
+    Err(format!(
+        "\"{key}\" is a send-time template, not a config key.\n\
+         Per-site credentials are never retrievable via `postagent config {action}` —\n\
+         they only exist as substitutions inside `postagent send`.\n\
+         \n\
+         \u{2717} postagent config {action} {key}              (won't work, by design)\n\
+         \u{2713} postagent send https://... -H 'Authorization: Bearer {template}'\n\
+         \n\
+         To check saved credentials:  postagent auth {site_lower} status\n\
+         To save/refresh credentials: postagent auth {site_lower}",
+        key = key,
+        action = action,
+        template = template,
+        site_lower = site_lower,
+    ))
+}
 
 fn config_file_with_base(base: &Path) -> PathBuf {
     base.join(".postagent")
@@ -70,6 +127,7 @@ pub fn run(
     match action {
         "set" => {
             let key = key.ok_or("Usage: postagent config set <KEY> <VALUE>")?;
+            reject_if_template_shaped("set", key)?;
             let value = value.ok_or("Usage: postagent config set <KEY> <VALUE>")?;
             let path = config_file();
             let mut config = load_config(&path);
@@ -80,6 +138,7 @@ pub fn run(
         }
         "get" => {
             let key = key.ok_or("Usage: postagent config get <KEY>")?;
+            reject_if_template_shaped("get", key)?;
             let path = config_file();
             let config = load_config(&path);
             match config.get(key) {
@@ -172,5 +231,46 @@ mod tests {
     fn resolve_api_key_treats_blank_config_as_missing() {
         let resolved = resolve_api_key_from(None, Some(String::new()));
         assert_eq!(resolved, None);
+    }
+
+    #[test]
+    fn rejects_per_site_template_shaped_keys() {
+        for key in [
+            "GMAIL.API_KEY",
+            "GITHUB.TOKEN",
+            "NOTION.ACCESS_TOKEN",
+            "SLACK.REFRESH_TOKEN",
+            "NOTION.EXTRAS.WORKSPACE_ID",
+            "gmail.api_key", // common typo path — regex is case-sensitive on the FIELD
+        ] {
+            // Only upper-case FIELD suffixes match the send-time template shape;
+            // lower-case variants must pass through untouched.
+            let is_upper_field = key
+                .split_once('.')
+                .map(|(_, tail)| {
+                    let field = tail.split('.').next().unwrap_or("");
+                    matches!(field, "API_KEY" | "TOKEN" | "ACCESS_TOKEN" | "REFRESH_TOKEN" | "EXTRAS")
+                })
+                .unwrap_or(false);
+            let result = reject_if_template_shaped("get", key);
+            if is_upper_field {
+                let err = result.expect_err(&format!("expected rejection for {}", key));
+                assert!(err.contains("send-time template"));
+                assert!(err.contains("postagent auth"));
+            } else {
+                assert!(result.is_ok(), "key {:?} should pass through", key);
+            }
+        }
+    }
+
+    #[test]
+    fn regular_config_keys_are_accepted() {
+        for key in ["apiKey", "baseUrl", "profile", "my_key", "server.url"] {
+            assert!(
+                reject_if_template_shaped("get", key).is_ok(),
+                "key {:?} should pass through",
+                key
+            );
+        }
     }
 }

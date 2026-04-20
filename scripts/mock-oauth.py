@@ -40,8 +40,8 @@ DESCRIPTOR = {
     },
     "scopes": {"default": ["read"], "separator": " "},
     "refresh": {"behavior": "reusable"},
-    "inject": {"in": "header", "name": "Authorization",
-               "value_template": "Bearer {access_token}"},
+    "injects": [{"in": "header", "name": "Authorization",
+                 "value_template": "Bearer {{access_token}}"}],
 }
 
 MANUAL_RESPONSE = {
