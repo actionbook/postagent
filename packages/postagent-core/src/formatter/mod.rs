@@ -1,4 +1,5 @@
 /// Truncate a string to max_len chars, appending `…` if truncated.
+#[allow(dead_code)]
 pub fn truncate(s: &str, max_len: usize) -> String {
     let chars: Vec<char> = s.chars().collect();
     if chars.len() <= max_len {
@@ -92,10 +93,7 @@ mod tests {
 
     #[test]
     fn align_columns_single_column() {
-        let rows = vec![
-            vec!["hello".into()],
-            vec!["world".into()],
-        ];
+        let rows = vec![vec!["hello".into()], vec!["world".into()]];
         let result = align_columns(&rows, 2);
         assert_eq!(result[0], "hello");
         assert_eq!(result[1], "world");

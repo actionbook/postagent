@@ -15,6 +15,7 @@ struct Authentication {
     name: Option<String>,
     #[serde(rename = "type")]
     auth_type: String,
+    #[allow(dead_code)]
     description: Option<String>,
 }
 
@@ -22,7 +23,10 @@ struct Authentication {
 #[serde(untagged)]
 enum SiteAction {
     Simple(String),
-    Detailed { name: String, summary: Option<String> },
+    Detailed {
+        name: String,
+        summary: Option<String>,
+    },
 }
 
 impl SiteAction {
@@ -54,6 +58,8 @@ struct SiteOverview {
     name: String,
     description: String,
     authentication: Option<Authentication>,
+    #[serde(default)]
+    auth_methods: Option<Vec<crate::descriptor::AuthMethod>>,
     groups: Vec<SiteGroup>,
 }
 
@@ -109,6 +115,7 @@ struct ResponseInfo {
 #[derive(Deserialize)]
 struct ActionDetail {
     site: String,
+    #[allow(dead_code)]
     group: String,
     action: String,
     method: String,
@@ -120,6 +127,8 @@ struct ActionDetail {
     request_body: Option<RequestBody>,
     responses: Vec<ResponseInfo>,
     authentication: Option<Authentication>,
+    #[serde(default)]
+    auth_methods: Option<Vec<crate::descriptor::AuthMethod>>,
     // Server returns only the $ref types this action transitively depends on,
     // keyed by schema name (e.g. `Parent`). Schemas reference each other by
     // ref name in the TYPE column; this section defines them.
@@ -223,16 +232,15 @@ fn extract_site_meta(data: &SiteOverview) -> SiteMeta {
                 .find_map(|group| group.base_url.as_ref().cloned())
         });
 
-    // Auth from authentication struct
-    let auth = data.authentication.as_ref().map(|a| format_auth_from_struct(a, &data.name));
+    // Prefer new auth_methods; fall back to legacy Authentication struct.
+    let auth = render_site_auth(&data.auth_methods, data.authentication.as_ref(), &data.name);
 
     // Version header from description
     let header = {
         let re = regex::Regex::new(r"`([A-Z][a-zA-Z]+-Version)` header \(latest: `([^`]+)`\)").ok();
         re.and_then(|re| {
-            re.captures(description).map(|caps| {
-                format!("{}: {}", &caps[1], &caps[2])
-            })
+            re.captures(description)
+                .map(|caps| format!("{}: {}", &caps[1], &caps[2]))
         })
     };
 
@@ -242,13 +250,15 @@ fn extract_site_meta(data: &SiteOverview) -> SiteMeta {
         re.and_then(|re| re.find(description).map(|m| m.as_str().to_string()))
             .or_else(|| {
                 let re = regex::Regex::new(r"([a-z]+\.dev(?:/[^\s`\)]*[a-z])?)").ok()?;
-                re.find(description).map(|m| m.as_str().trim_end_matches('.').to_string())
+                re.find(description)
+                    .map(|m| m.as_str().trim_end_matches('.').to_string())
             })
     };
 
     if is_graphql {
         let endpoint = base_url.as_ref().map(|u| format!("POST {}", u));
-        let gql_auth = data.authentication.as_ref().map(|a| format_auth_from_struct(a, &data.name));
+        let gql_auth =
+            render_site_auth(&data.auth_methods, data.authentication.as_ref(), &data.name);
 
         SiteMeta {
             base_url: None,
@@ -280,11 +290,212 @@ fn format_auth_from_struct(auth: &Authentication, site: &str) -> String {
     }
 }
 
+/// Renders the `auth:` / `Auth:` line for site + action overviews. New CLI
+/// prefers `auth_methods` when present; falls back to the legacy
+/// `Authentication` struct so older servers keep working. When
+/// `auth_methods` is explicitly an empty array, the site is an un-upgraded
+/// OAuth spec — we surface a hint instead of rendering a template.
+fn render_site_auth(
+    methods: &Option<Vec<crate::descriptor::AuthMethod>>,
+    legacy: Option<&Authentication>,
+    site: &str,
+) -> Option<String> {
+    if let Some(ms) = methods {
+        if ms.is_empty() {
+            return Some(
+                "This spec's OAuth configuration is not upgraded. Contact the registry maintainer."
+                    .to_string(),
+            );
+        }
+        return Some(format_auth_methods(ms, site));
+    }
+    legacy.map(|a| format_auth_from_struct(a, site))
+}
+
+fn render_oauth_value_template(site: &str, template: &str) -> String {
+    let upper = site.to_uppercase();
+    let token_var = format!("$POSTAGENT.{}.TOKEN", upper);
+    regex::Regex::new(r"\{\{([A-Za-z0-9_]+)\}\}")
+        .unwrap()
+        .replace_all(template, |caps: &regex::Captures<'_>| {
+            let name = &caps[1];
+            if name == "access_token" {
+                token_var.clone()
+            } else {
+                format!("$POSTAGENT.{}.EXTRAS.{}", upper, name.to_uppercase())
+            }
+        })
+        .into_owned()
+}
+
+fn format_injection_hint(location: &str, name: &str, rendered: &str) -> String {
+    if location.eq_ignore_ascii_case("header") {
+        format!("{}: {}", name, rendered)
+    } else if location.eq_ignore_ascii_case("query") {
+        format!("query {}={}", name, rendered)
+    } else if location.eq_ignore_ascii_case("cookie") {
+        format!("cookie {}={}", name, rendered)
+    } else {
+        format!("{} {}={}", location, name, rendered)
+    }
+}
+
+/// Per design §8.3: render one line per method describing how to inject the
+/// credential, using `$POSTAGENT.<SITE>.*` templates. When an OAuth method
+/// declares multiple `injects` entries (Shopify, Slack dual, Feishu), each is
+/// rendered on its own sub-line so the user can see every header they need.
+fn render_method_line(method: &crate::descriptor::AuthMethod, site: &str) -> String {
+    use crate::descriptor::AuthMethod;
+    let upper = site.to_uppercase();
+    match method {
+        AuthMethod::Static(s) => {
+            let key_var = format!("$POSTAGENT.{}.API_KEY", upper);
+            let rendered = if let Some(tmpl) = &s.value_template {
+                let rendered = tmpl.replace("{{token}}", &key_var);
+                rendered
+            } else if s.scheme == "bearer"
+                && s.location == "header"
+                && s.name.eq_ignore_ascii_case("Authorization")
+            {
+                format!("Bearer {}", key_var)
+            } else {
+                key_var
+            };
+            format_injection_hint(&s.location, &s.name, &rendered)
+        }
+        AuthMethod::Oauth2(o) => {
+            let lines: Vec<String> = o
+                .injects
+                .iter()
+                .map(|inj| {
+                    let rendered = render_oauth_value_template(site, &inj.value_template);
+                    format_injection_hint(&inj.location, &inj.name, &rendered)
+                })
+                .collect();
+            lines.join("\n             ")
+        }
+    }
+}
+
+pub fn format_auth_methods(methods: &[crate::descriptor::AuthMethod], site: &str) -> String {
+    if methods.len() == 1 {
+        return render_method_line(&methods[0], site);
+    }
+    // Multi-method: list each by method id (short, stable) rather than label
+    // (often long marketing copy). Prefix with `id=` so an agent reading this
+    // knows which id to pass to `postagent auth <site> --method <id>`.
+    methods
+        .iter()
+        .map(|m| format!("[{}] {}", m.id(), render_method_line(m, site)))
+        .collect::<Vec<_>>()
+        .join("\n             ")
+}
+
+/// Picks the send-time token template to recommend in "Next step" hints.
+///
+/// Priority:
+///   1. `auth_methods` non-empty  → `.TOKEN` (dispatches on saved kind,
+///      works for both static and oauth2 — safe universal default).
+///   2. `auth_methods` empty / absent but legacy `authentication` present
+///      → `.API_KEY` (pre-OAuth path; only makes sense for static sites).
+///   3. Neither present → None (caller omits the hint).
+fn primary_send_template(
+    auth_methods: &Option<Vec<crate::descriptor::AuthMethod>>,
+    legacy: Option<&Authentication>,
+    site: &str,
+) -> Option<String> {
+    let upper = site.to_uppercase();
+    match auth_methods {
+        Some(ms) if !ms.is_empty() => Some(format!("$POSTAGENT.{}.TOKEN", upper)),
+        _ => legacy.map(|_| format!("$POSTAGENT.{}.API_KEY", upper)),
+    }
+}
+
+/// Renders the bottom "Next step" block for L2 / L3 outputs. Centralizes
+/// the send-template guidance so it stays consistent and always reflects
+/// the site's actual auth configuration (previously L3 hardcoded .API_KEY,
+/// which misled agents on OAuth sites).
+fn format_send_hint(
+    auth_methods: &Option<Vec<crate::descriptor::AuthMethod>>,
+    legacy: Option<&Authentication>,
+    site: &str,
+) -> String {
+    let mut out = String::from(
+        "  Next step: use `postagent send <CURL_QUERY>` to send an HTTP request with a cURL syntax.\n",
+    );
+    let is_multi = auth_methods.as_ref().map(|m| m.len() > 1).unwrap_or(false);
+    if is_multi {
+        out.push_str(&format!(
+            "  This site supports multiple auth methods (see `auth:` above). Run\n\
+             \x20 `postagent auth {site}` to pick one, then pass $POSTAGENT.{upper}.TOKEN\n\
+             \x20 (or whichever template is shown above) as a literal string in -H / -d / URL.\n",
+            site = site,
+            upper = site.to_uppercase(),
+        ));
+    } else if let Some(var) = primary_send_template(auth_methods, legacy, site) {
+        out.push_str(&format!(
+            "  `postagent send` substitutes {} with your saved credentials —\n\
+             \x20 pass it as a literal string; do not try to fetch the value separately.\n",
+            var
+        ));
+    }
+    out
+}
+
+/// Fetches the site-level manual response and returns `auth_methods` if present.
+/// Used by `postagent auth <site>` to dispatch on the descriptor. Returns
+/// `Ok(None)` when the server didn't include `auth_methods` (legacy server).
+fn parse_auth_methods_payload(
+    data: serde_json::Value,
+) -> Result<Option<Vec<crate::descriptor::AuthMethod>>, Box<dyn std::error::Error>> {
+    #[derive(serde::Deserialize)]
+    struct AuthOnly {
+        #[serde(default)]
+        auth_methods: Option<Vec<crate::descriptor::AuthMethod>>,
+    }
+
+    let parsed: AuthOnly = serde_json::from_value(data).map_err(|e| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("manual auth_methods payload is invalid: {}", e),
+        )
+    })?;
+    Ok(parsed.auth_methods)
+}
+
+pub fn fetch_site_auth_methods(
+    site: &str,
+) -> Result<Option<Vec<crate::descriptor::AuthMethod>>, Box<dyn std::error::Error>> {
+    let client = Client::new();
+    let url = format!(
+        "{}/api/manual?site={}",
+        crate::config::api_base(),
+        urlencoding(site)
+    );
+    let mut request = client.get(&url);
+    if let Some(api_key) = super::config::resolve_api_key() {
+        request = request.header("x-api-key", api_key);
+    }
+    let response = request
+        .send()
+        .map_err(|_| "Failed to connect to postagent server.")?;
+
+    if !response.status().is_success() {
+        let body: serde_json::Value = response.json()?;
+        crate::api_response::print_api_error(&body);
+        return Err("manual fetch failed".into());
+    }
+
+    let body_text = response.text()?;
+    let data = crate::api_response::unwrap_data(serde_json::from_str(&body_text)?);
+    parse_auth_methods_payload(data)
+}
+
 fn format_site_overview(data: &SiteOverview) -> String {
     let meta = extract_site_meta(data);
 
     let mut output = String::new();
-    output.push_str(&format!("  === {}\n\n", data.name));
+    output.push_str(&format!("  Site:      {}\n", data.name));
 
     // Render metadata block
     if meta.api_type.as_deref() == Some("GraphQL") {
@@ -347,9 +558,17 @@ fn format_site_overview(data: &SiteOverview) -> String {
                 output.push_str(&format!("    {}\n", line));
             }
         } else {
-            let max_name_width = render_actions.iter().map(|a| a.name().len()).max().unwrap_or(0);
+            let max_name_width = render_actions
+                .iter()
+                .map(|a| a.name().len())
+                .max()
+                .unwrap_or(0);
             for action in render_actions {
-                output.push_str(&format!("    {:<width$}\n", action.name(), width = max_name_width));
+                output.push_str(&format!(
+                    "    {:<width$}\n",
+                    action.name(),
+                    width = max_name_width
+                ));
             }
         }
 
@@ -358,9 +577,7 @@ fn format_site_overview(data: &SiteOverview) -> String {
         }
     }
 
-    output.push_str(
-        "\n  Run postagent manual <SITE> [GROUP] [ACTION] for full details.\n",
-    );
+    output.push_str("\n  Run postagent manual <SITE> [GROUP] [ACTION] for full details.\n");
     if let Some(first_group) = data.groups.first() {
         output.push_str(&format!(
             "  Example: postagent manual {} {}  # List actions in group\n",
@@ -369,7 +586,9 @@ fn format_site_overview(data: &SiteOverview) -> String {
         if let Some(first_action) = first_group.actions.first() {
             output.push_str(&format!(
                 "           postagent manual {} {} {}  # Get full details of action",
-                data.name, first_group.name, first_action.name()
+                data.name,
+                first_group.name,
+                first_action.name()
             ));
         }
     }
@@ -405,9 +624,7 @@ fn format_group_overview(data: &GroupOverview, site: &str) -> String {
         output.push_str(&format!("    {}\n", line));
     }
 
-    output.push_str(
-        "\n  Run postagent manual <SITE> [GROUP] [ACTION] for full details.\n",
-    );
+    output.push_str("\n  Run postagent manual <SITE> [GROUP] [ACTION] for full details.\n");
     if let Some(first_action) = data.actions.first() {
         output.push_str(&format!(
             "  Example: postagent manual {} {} {}  # Get full details of action",
@@ -466,7 +683,11 @@ fn walk_schema(
         let required_fields: std::collections::HashSet<String> = schema
             .get("required")
             .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default();
 
         for (field_name, field_schema) in props_obj {
@@ -562,7 +783,10 @@ fn describe_top_type_with_depth(schema: &serde_json::Value, walk_depth: usize) -
     let t = extract_type(schema);
     if t == "array" {
         if let Some(items) = schema.get("items") {
-            return format!("array<{}>", describe_top_type_with_depth(items, walk_depth + 1));
+            return format!(
+                "array<{}>",
+                describe_top_type_with_depth(items, walk_depth + 1)
+            );
         }
     }
     t
@@ -694,7 +918,10 @@ fn schema_constraints(schema: &serde_json::Value) -> Option<String> {
 }
 
 fn compose_description(schema: &serde_json::Value) -> String {
-    let desc = schema.get("description").and_then(|v| v.as_str()).unwrap_or("");
+    let desc = schema
+        .get("description")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     match (schema_constraints(schema), desc.is_empty()) {
         (Some(c), true) => c,
         (Some(c), false) => format!("{} {}", c, desc),
@@ -725,8 +952,10 @@ fn format_action_detail(data: &ActionDetail) -> String {
             output.push_str(&format!("  base_url:  {}\n", base_url));
         }
     }
-    if let Some(ref auth) = data.authentication {
-        output.push_str(&format!("  auth:      {}\n", format_auth_from_struct(auth, &data.site)));
+    if let Some(auth_line) =
+        render_site_auth(&data.auth_methods, data.authentication.as_ref(), &data.site)
+    {
+        output.push_str(&format!("  auth:      {}\n", auth_line));
     }
 
     // Separator
@@ -742,7 +971,11 @@ fn format_action_detail(data: &ActionDetail) -> String {
 
     // Parameters
     if !data.parameters.is_empty() {
-        let header_label = if is_graphql { "## Arguments" } else { "## Parameters" };
+        let header_label = if is_graphql {
+            "## Arguments"
+        } else {
+            "## Parameters"
+        };
         output.push_str(&format!("\n  {}\n\n", header_label));
 
         let field_label = if is_graphql { "ARGUMENT" } else { "FIELD" };
@@ -757,7 +990,11 @@ fn format_action_detail(data: &ActionDetail) -> String {
             table_rows.push(vec![
                 p.name.clone(),
                 p.param_type.clone(),
-                if p.required { "yes".into() } else { "no".into() },
+                if p.required {
+                    "yes".into()
+                } else {
+                    "no".into()
+                },
                 p.description.clone(),
             ]);
         }
@@ -776,7 +1013,10 @@ fn format_action_detail(data: &ActionDetail) -> String {
             if let Some(table) = format_schema_table(schema, REQUEST_SCHEMA_DEPTH) {
                 output.push_str(&table);
             } else if let Some(desc) = schema.get("description").and_then(|v| v.as_str()) {
-                let type_str = schema.get("type").and_then(|v| v.as_str()).unwrap_or("object");
+                let type_str = schema
+                    .get("type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("object");
                 output.push_str(&format!("  Type: {}\n", type_str));
                 output.push_str(&format!("  {}\n", desc));
             }
@@ -817,14 +1057,11 @@ fn format_action_detail(data: &ActionDetail) -> String {
 
     // Send hint
     output.push_str("\n  ---\n\n");
-    output.push_str("  Next step: use `postagent send <CURL_QUERY>` to send an HTTP request with a cURL syntax.\n");
-    if data.authentication.is_some() {
-        let key_var = format!("$POSTAGENT.{}.API_KEY", data.site.to_uppercase());
-        output.push_str(&format!(
-            "  `postagent send` will replace {} with your saved credentials.\n",
-            key_var
-        ));
-    }
+    output.push_str(&format_send_hint(
+        &data.auth_methods,
+        data.authentication.as_ref(),
+        &data.site,
+    ));
 
     output.trim_end().to_string()
 }
@@ -909,7 +1146,7 @@ mod tests {
         .unwrap();
 
         let output = format_site_overview(&data);
-        assert!(output.contains("=== notion"));
+        assert!(output.contains("Site:      notion"));
         assert!(output.contains("Base URL:"));
         assert!(output.contains("https://api.notion.com"));
         assert!(output.contains("Auth:"));
@@ -922,11 +1159,14 @@ mod tests {
 
     #[test]
     fn format_site_overview_truncation() {
-        let actions: Vec<SiteAction> = (0..15).map(|i| SiteAction::Simple(format!("action_{}", i))).collect();
+        let actions: Vec<SiteAction> = (0..15)
+            .map(|i| SiteAction::Simple(format!("action_{}", i)))
+            .collect();
         let data = SiteOverview {
             name: "test".into(),
             description: "".into(),
             authentication: None,
+            auth_methods: None,
             groups: vec![SiteGroup {
                 name: "big_group".into(),
                 base_url: None,
@@ -946,6 +1186,7 @@ mod tests {
             name: "notion".into(),
             description: "Docs at `developers.notion.com`.".into(),
             authentication: None,
+            auth_methods: None,
             groups: vec![SiteGroup {
                 name: "pages".into(),
                 base_url: Some("https://api.notion.com".into()),
@@ -955,6 +1196,171 @@ mod tests {
 
         let output = format_site_overview(&data);
         assert!(output.contains("Base URL:  https://api.notion.com"));
+    }
+
+    #[test]
+    fn site_overview_oauth_site_shows_token_template() {
+        // OAuth-only gmail: .TOKEN (not .API_KEY) must appear in auth line.
+        let data: SiteOverview = serde_json::from_value(json!({
+            "name": "gmail",
+            "description": "All requests go to `https://gmail.googleapis.com`.",
+            "authentication": null,
+            "auth_methods": [{
+                "kind": "oauth2",
+                "id": "oauth",
+                "label": "OAuth 2.0",
+                "grants": ["authorization_code"],
+                "client": { "type": "public" },
+                "authorize": { "url": "https://accounts.google.com/o/oauth2/v2/auth" },
+                "token": {
+                    "url": "https://oauth2.googleapis.com/token",
+                    "body_encoding": "form",
+                    "client_auth": "either",
+                    "response_map": { "access_token": "/access_token" }
+                },
+                "scopes": { "default": [], "separator": " " },
+                "refresh": { "behavior": "reusable" },
+                "injects": [{ "in": "header", "name": "Authorization", "value_template": "Bearer {{access_token}}" }]
+            }],
+            "groups": []
+        })).unwrap();
+
+        let out = format_site_overview(&data);
+        assert!(out.contains("Authorization: Bearer $POSTAGENT.GMAIL.TOKEN"));
+        assert!(
+            !out.contains("GMAIL.API_KEY"),
+            "OAuth sites must not surface .API_KEY"
+        );
+    }
+
+    #[test]
+    fn site_overview_multi_method_lists_both_templates() {
+        let data: SiteOverview = serde_json::from_value(json!({
+            "name": "github",
+            "description": "",
+            "authentication": null,
+            "auth_methods": [
+                { "kind": "static", "id": "pat", "label": "PAT", "scheme": "bearer", "in": "header", "name": "Authorization" },
+                {
+                    "kind": "oauth2", "id": "oauth", "label": "OAuth",
+                    "grants": ["authorization_code"], "client": { "type": "public" },
+                    "authorize": { "url": "https://github.com/login/oauth/authorize" },
+                    "token": { "url": "https://github.com/login/oauth/access_token", "body_encoding": "form", "client_auth": "either", "response_map": { "access_token": "/access_token" } },
+                    "scopes": { "default": [], "separator": " " }, "refresh": { "behavior": "reusable" },
+                    "injects": [{ "in": "header", "name": "Authorization", "value_template": "Bearer {{access_token}}" }]
+                }
+            ],
+            "groups": []
+        })).unwrap();
+
+        let out = format_site_overview(&data);
+        // Both templates visible in the top Auth: line, prefixed by method id
+        // (not long label) so lines stay compact.
+        assert!(out.contains("[pat]"));
+        assert!(out.contains("[oauth]"));
+        assert!(out.contains("$POSTAGENT.GITHUB.API_KEY"));
+        assert!(out.contains("$POSTAGENT.GITHUB.TOKEN"));
+    }
+
+    #[test]
+    fn site_overview_oauth_site_renders_extras_templates() {
+        let data: SiteOverview = serde_json::from_value(json!({
+            "name": "slack",
+            "description": "",
+            "authentication": null,
+            "auth_methods": [{
+                "kind": "oauth2",
+                "id": "oauth",
+                "label": "OAuth",
+                "grants": ["authorization_code"],
+                "client": { "type": "public" },
+                "authorize": { "url": "https://slack.com/oauth/v2/authorize" },
+                "token": {
+                    "url": "https://slack.com/api/oauth.v2.access",
+                    "body_encoding": "form",
+                    "client_auth": "either",
+                    "response_map": {
+                        "access_token": "/access_token",
+                        "extras": { "workspace_id": "/team/id" }
+                    }
+                },
+                "scopes": { "default": [], "separator": " " },
+                "refresh": { "behavior": "reusable" },
+                "injects": [
+                    { "in": "header", "name": "Authorization", "value_template": "Bearer {{access_token}}" },
+                    { "in": "header", "name": "X-Workspace-Id", "value_template": "{{workspace_id}}" }
+                ]
+            }],
+            "groups": []
+        })).unwrap();
+
+        let out = format_site_overview(&data);
+        assert!(out.contains("Authorization: Bearer $POSTAGENT.SLACK.TOKEN"));
+        assert!(out.contains("X-Workspace-Id: $POSTAGENT.SLACK.EXTRAS.WORKSPACE_ID"));
+        assert!(!out.contains("{{workspace_id}}"));
+    }
+
+    #[test]
+    fn site_overview_oauth_site_renders_query_and_cookie_inject_locations() {
+        let data: SiteOverview = serde_json::from_value(json!({
+            "name": "figma",
+            "description": "",
+            "authentication": null,
+            "auth_methods": [{
+                "kind": "oauth2",
+                "id": "oauth",
+                "label": "OAuth",
+                "grants": ["authorization_code"],
+                "client": { "type": "public" },
+                "authorize": { "url": "https://www.figma.com/oauth" },
+                "token": {
+                    "url": "https://api.figma.com/v1/oauth/token",
+                    "body_encoding": "form",
+                    "client_auth": "either",
+                    "response_map": {
+                        "access_token": "/access_token",
+                        "extras": { "session_id": "/session_id" }
+                    }
+                },
+                "scopes": { "default": [], "separator": " " },
+                "refresh": { "behavior": "reusable" },
+                "injects": [
+                    { "in": "query", "name": "access_token", "value_template": "{{access_token}}" },
+                    { "in": "cookie", "name": "figma-session", "value_template": "{{session_id}}" }
+                ]
+            }],
+            "groups": []
+        }))
+        .unwrap();
+
+        let out = format_site_overview(&data);
+        assert!(out.contains("query access_token=$POSTAGENT.FIGMA.TOKEN"));
+        assert!(out.contains("cookie figma-session=$POSTAGENT.FIGMA.EXTRAS.SESSION_ID"));
+        assert!(!out.contains("access_token: $POSTAGENT.FIGMA.TOKEN"));
+    }
+
+    #[test]
+    fn parse_auth_methods_payload_returns_none_when_field_is_missing() {
+        let parsed = parse_auth_methods_payload(json!({
+            "name": "github",
+            "description": "legacy payload"
+        }))
+        .unwrap();
+
+        assert!(parsed.is_none());
+    }
+
+    #[test]
+    fn parse_auth_methods_payload_rejects_invalid_auth_methods_shape() {
+        let err = parse_auth_methods_payload(json!({
+            "auth_methods": {
+                "kind": "oauth2"
+            }
+        }))
+        .unwrap_err()
+        .to_string();
+
+        assert!(err.contains("manual auth_methods payload is invalid"));
     }
 
     #[test]
@@ -1063,6 +1469,47 @@ mod tests {
     }
 
     #[test]
+    fn action_detail_oauth_site_shows_token_in_send_hint() {
+        // The L3 footer used to hardcode `.API_KEY`, which misled agents on
+        // OAuth sites into trying `$POSTAGENT.<SITE>.API_KEY`. Verify the
+        // fixed hint points to `.TOKEN` for an OAuth-only site.
+        let data: ActionDetail = serde_json::from_value(json!({
+            "site": "gmail",
+            "group": "users",
+            "action": "get_profile",
+            "method": "GET",
+            "path": "/gmail/v1/users/{userId}/profile",
+            "base_url": "https://gmail.googleapis.com",
+            "description": "Get the authenticated user's Gmail profile.",
+            "parameters": [],
+            "responses": [{ "status": "200", "description": "OK", "schema": {} }],
+            "authentication": null,
+            "auth_methods": [{
+                "kind": "oauth2", "id": "oauth", "label": "OAuth",
+                "grants": ["authorization_code"], "client": { "type": "public" },
+                "authorize": { "url": "https://accounts.google.com/o/oauth2/v2/auth" },
+                "token": { "url": "https://oauth2.googleapis.com/token", "body_encoding": "form", "client_auth": "either", "response_map": { "access_token": "/access_token" } },
+                "scopes": { "default": [], "separator": " " }, "refresh": { "behavior": "reusable" },
+                "injects": [{ "in": "header", "name": "Authorization", "value_template": "Bearer {{access_token}}" }]
+            }]
+        })).unwrap();
+
+        let output = format_action_detail(&data);
+        assert!(
+            output.contains("Bearer $POSTAGENT.GMAIL.TOKEN"),
+            "auth line must show .TOKEN"
+        );
+        assert!(
+            output.contains("substitutes $POSTAGENT.GMAIL.TOKEN"),
+            "send hint must also point to .TOKEN (was hardcoded to .API_KEY before fix)"
+        );
+        assert!(
+            !output.contains("GMAIL.API_KEY"),
+            "OAuth-only site must never surface .API_KEY"
+        );
+    }
+
+    #[test]
     fn format_action_detail_graphql() {
         let data: ActionDetail = serde_json::from_value(json!({
             "site": "shopify",
@@ -1152,7 +1599,10 @@ mod tests {
             ]
         });
         let table = format_schema_table(&schema, REQUEST_SCHEMA_DEPTH).expect("table");
-        assert!(table.contains("common"), "base property `common` must appear");
+        assert!(
+            table.contains("common"),
+            "base property `common` must appear"
+        );
         assert!(table.contains("Always present"));
         assert!(table.contains("id"), "base property `id` must appear");
         assert!(table.contains("variantField"), "variant field must appear");
@@ -1162,7 +1612,10 @@ mod tests {
         // shared/required parts read first.
         let common_pos = table.find("common").unwrap();
         let variant_pos = table.find("variantField").unwrap();
-        assert!(common_pos < variant_pos, "base props must precede variant fields");
+        assert!(
+            common_pos < variant_pos,
+            "base props must precede variant fields"
+        );
     }
 
     #[test]
@@ -1246,10 +1699,16 @@ mod tests {
         // TYPE column keeps the ref name, not an expanded object.
         let body_header = output.find("## Request Body").unwrap();
         let types_header = output.find("## Types").unwrap();
-        assert!(body_header < types_header, "Types section must come after Request Body");
+        assert!(
+            body_header < types_header,
+            "Types section must come after Request Body"
+        );
         let body_section = &output[body_header..types_header];
         assert!(body_section.contains("parent"));
-        assert!(body_section.contains("Parent"), "TYPE column should show the ref name");
+        assert!(
+            body_section.contains("Parent"),
+            "TYPE column should show the ref name"
+        );
 
         // Types section defines each referenced type, sorted alphabetically.
         let types_section = &output[types_header..];

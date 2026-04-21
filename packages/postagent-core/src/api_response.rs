@@ -4,10 +4,7 @@ use serde_json::Value;
 /// Falls back to the original value if no `data` field is present.
 pub fn unwrap_data(envelope: Value) -> Value {
     match envelope {
-        Value::Object(mut map) => {
-            map.remove("data")
-                .unwrap_or_else(|| Value::Object(map))
-        }
+        Value::Object(mut map) => map.remove("data").unwrap_or(Value::Object(map)),
         other => other,
     }
 }
@@ -28,7 +25,11 @@ fn extract_api_error(body: &Value) -> (Option<String>, Option<Vec<String>>) {
     let available = error
         .get("available")
         .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect::<Vec<_>>())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect::<Vec<_>>()
+        })
         .filter(|v| !v.is_empty());
 
     (message, available)
@@ -105,7 +106,14 @@ mod tests {
         assert_eq!(message.as_deref(), Some("Resource \"x\" not found."));
         assert_eq!(
             available.as_deref(),
-            Some(vec!["pages".to_string(), "blocks".to_string(), "databases".to_string()].as_slice())
+            Some(
+                vec![
+                    "pages".to_string(),
+                    "blocks".to_string(),
+                    "databases".to_string()
+                ]
+                .as_slice()
+            )
         );
     }
 

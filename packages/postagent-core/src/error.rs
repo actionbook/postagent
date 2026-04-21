@@ -59,7 +59,9 @@ mod tests {
 
     #[test]
     fn auth_not_found_message() {
-        let err = AppError::AuthNotFound { site: "github".to_string() };
+        let err = AppError::AuthNotFound {
+            site: "github".to_string(),
+        };
         assert_eq!(
             err.to_string(),
             "Auth not found for \"github\". Run: postagent auth github"

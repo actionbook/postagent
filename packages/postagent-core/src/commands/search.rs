@@ -33,7 +33,9 @@ struct FlatRow {
     site: String,
     group: String,
     action: String,
+    #[allow(dead_code)]
     method: String,
+    #[allow(dead_code)]
     path: String,
     summary: String,
     score: f64,
@@ -75,7 +77,13 @@ pub fn run(query: &str, json: bool) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn score_action(query_words: &[String], site: &str, group: &str, action: &str, summary: &str) -> f64 {
+fn score_action(
+    query_words: &[String],
+    site: &str,
+    group: &str,
+    action: &str,
+    summary: &str,
+) -> f64 {
     let mut score = 0.0;
     let site_lower = site.to_lowercase();
     let group_lower = group.to_lowercase();
@@ -114,7 +122,12 @@ fn format_search_results(sites: &[SearchSite], query: &str) -> String {
     let query_words: Vec<String> = query
         .to_lowercase()
         .split_whitespace()
-        .filter(|w| !["a", "an", "the", "in", "from", "for", "to", "of", "all", "new"].contains(w))
+        .filter(|w| {
+            ![
+                "a", "an", "the", "in", "from", "for", "to", "of", "all", "new",
+            ]
+            .contains(w)
+        })
         .map(String::from)
         .collect();
 
@@ -167,6 +180,7 @@ fn format_search_results(sites: &[SearchSite], query: &str) -> String {
     let result_count = rows.len();
 
     // Group by site -> group, preserving score order
+    #[allow(clippy::type_complexity)]
     let mut sites: Vec<(String, Vec<(String, Vec<&FlatRow>)>)> = Vec::new();
     for r in &rows {
         let site_entry = sites.iter_mut().find(|(s, _)| s == &r.site);
