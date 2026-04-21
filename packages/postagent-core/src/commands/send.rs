@@ -28,10 +28,10 @@ fn validated_send_url(raw_url: &str) -> Result<reqwest::Url, String> {
     if url.scheme() == "https" || is_loopback_http {
         Ok(url)
     } else {
-        Err(format!(
-            "Refusing to send $POSTAGENT credentials to non-HTTPS URL {}. Use https:// or an http://localhost/127.0.0.1/[::1] URL for local testing.",
-            raw_url
-        ))
+        Err(
+            "Refusing to send $POSTAGENT credentials to a non-HTTPS URL. Use https:// or an http://localhost/127.0.0.1/[::1] URL for local testing."
+                .to_string(),
+        )
     }
 }
 
@@ -374,6 +374,7 @@ mod tests {
     fn validated_send_url_rejects_remote_http() {
         let err = validated_send_url("http://api.example.com/v1").unwrap_err();
         assert!(err.contains("non-HTTPS URL"));
+        assert!(!err.contains("api.example.com"));
     }
 
     #[test]

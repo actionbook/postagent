@@ -170,6 +170,24 @@ pub fn save_app(site: &str, app: &AppConfig) -> Result<(), Box<dyn std::error::E
     save_app_to(&home(), site, app)
 }
 
+pub fn save_provider_auth(
+    provider: &str,
+    auth: &AuthFile,
+) -> Result<(), Box<dyn std::error::Error>> {
+    save_provider_auth_to(&home(), provider, auth)
+}
+
+pub fn load_provider_app(provider: &str) -> Option<AppConfig> {
+    load_provider_app_from(&home(), provider)
+}
+
+pub fn save_provider_app(
+    provider: &str,
+    app: &AppConfig,
+) -> Result<(), Box<dyn std::error::Error>> {
+    save_provider_app_to(&home(), provider, app)
+}
+
 /// Link this site to a shared provider namespace. After this call,
 /// `load_auth` / `save_auth` / `load_app` / `save_app` for `site` route to
 /// `providers/<provider>/` instead of the per-site directory. Idempotent:
@@ -179,6 +197,10 @@ pub fn save_app(site: &str, app: &AppConfig) -> Result<(), Box<dyn std::error::E
 /// provider-backed site so those writes land in the shared directory.
 pub fn save_provider_pointer(site: &str, provider: &str) -> Result<(), Box<dyn std::error::Error>> {
     save_provider_pointer_to(&home(), site, provider)
+}
+
+pub fn provider_for_site(site: &str) -> Option<String> {
+    load_provider_pointer(&home(), site)
 }
 
 pub fn logout(site: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -382,9 +404,41 @@ fn load_app_from(base: &Path, site: &str) -> Option<AppConfig> {
     serde_yaml::from_str(&content).ok()
 }
 
+fn load_provider_auth_from(base: &Path, provider: &str) -> Option<AuthFile> {
+    let provider = normalize_provider_name(provider).ok()?;
+    let content = fs::read_to_string(providers_dir(base, &provider).join("auth.yaml")).ok()?;
+    serde_yaml::from_str(&content).ok()
+}
+
+fn save_provider_auth_to(
+    base: &Path,
+    provider: &str,
+    auth: &AuthFile,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let provider = normalize_provider_name(provider)?;
+    let yaml = serde_yaml::to_string(auth)?;
+    atomic_write(&providers_dir(base, &provider).join("auth.yaml"), yaml.as_bytes())
+}
+
+fn load_provider_app_from(base: &Path, provider: &str) -> Option<AppConfig> {
+    let provider = normalize_provider_name(provider).ok()?;
+    let content = fs::read_to_string(providers_dir(base, &provider).join("app.yaml")).ok()?;
+    serde_yaml::from_str(&content).ok()
+}
+
 fn save_app_to(base: &Path, site: &str, app: &AppConfig) -> Result<(), Box<dyn std::error::Error>> {
     let yaml = serde_yaml::to_string(app)?;
     atomic_write(&app_file(base, site), yaml.as_bytes())
+}
+
+fn save_provider_app_to(
+    base: &Path,
+    provider: &str,
+    app: &AppConfig,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let provider = normalize_provider_name(provider)?;
+    let yaml = serde_yaml::to_string(app)?;
+    atomic_write(&providers_dir(base, &provider).join("app.yaml"), yaml.as_bytes())
 }
 
 fn save_provider_pointer_to(
@@ -779,6 +833,33 @@ mod tests {
         assert!(token_dir_with_base(base, "google-drive")
             .join("auth.yaml")
             .exists());
+    }
+
+    #[test]
+    fn provider_helpers_stage_shared_state_without_pointer() {
+        let tmp = TempDir::new().unwrap();
+        let base = tmp.path();
+
+        let app = AppConfig {
+            method_id: "oauth".into(),
+            client_id: "shared-cid".into(),
+            client_secret: Some("shared-sec".into()),
+            descriptor_hash: "hhhhhhhhhhhhhhhh".into(),
+        };
+        save_provider_app_to(base, "google", &app).unwrap();
+
+        let mut auth = AuthFile::default();
+        auth.kind = Some(AuthKind::Oauth2);
+        auth.access_token = Some("shared-at".into());
+        save_provider_auth_to(base, "google", &auth).unwrap();
+
+        let loaded_app = load_provider_app_from(base, "google").unwrap();
+        assert_eq!(loaded_app.client_id, "shared-cid");
+        let loaded_auth = load_provider_auth_from(base, "google").unwrap();
+        assert_eq!(loaded_auth.access_token.as_deref(), Some("shared-at"));
+
+        assert!(load_app_from(base, "google-drive").is_none());
+        assert!(load_auth_from(base, "google-drive").is_none());
     }
 
     #[test]

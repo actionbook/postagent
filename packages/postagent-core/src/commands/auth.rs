@@ -535,15 +535,9 @@ fn handle_oauth2(
     method: &descriptor::OAuth2AuthMethod,
     args: &LoginArgs<'_>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Link this site into its provider namespace BEFORE any load_app /
-    // save_app / save_auth call, so every subsequent read/write routes to
-    // the shared `providers/<provider>/` dir. Siblings that already
-    // authorized under the same provider can now reuse those creds + the
-    // existing access/refresh token (Google's `include_granted_scopes=true`
-    // lets Google accumulate scopes across re-authorizations).
-    if let Some(provider) = method.provider.as_deref() {
-        token::save_provider_pointer(site, provider)?;
-        if token::load_app(site).is_some() {
+    let provider = method.provider.as_deref();
+    if let Some(provider) = provider {
+        if token::load_provider_app(provider).is_some() {
             eprintln!(
                 "Reusing shared credentials for provider \"{}\" — client_id/secret will not be prompted.",
                 provider
@@ -562,7 +556,9 @@ fn handle_oauth2(
     let placeholders = collect_placeholders(method, args.params)?;
 
     // Resolve client credentials: CLI flags > saved app.yaml > interactive.
-    let existing_app = token::load_app(site);
+    let existing_app = provider
+        .and_then(token::load_provider_app)
+        .or_else(|| token::load_app(site));
     let desc_hash = descriptor::descriptor_hash(&AuthMethod::Oauth2(method.clone()));
 
     let client_id = match args.client_id {
@@ -610,7 +606,11 @@ fn handle_oauth2(
         client_secret: client_secret.clone(),
         descriptor_hash: desc_hash.clone(),
     };
-    token::save_app(site, &app)?;
+    if let Some(provider) = provider {
+        token::save_provider_app(provider, &app)?;
+    } else {
+        token::save_app(site, &app)?;
+    }
 
     // Resolve the scope set, in priority order:
     //   1. --scope flags on the CLI (explicit override, highest priority)
@@ -669,7 +669,12 @@ fn handle_oauth2(
         extras: tokens.extras.clone(),
         ..Default::default()
     };
-    token::save_auth(site, &auth)?;
+    if let Some(provider) = provider {
+        token::save_provider_auth(provider, &auth)?;
+        token::save_provider_pointer(site, provider)?;
+    } else {
+        token::save_auth(site, &auth)?;
+    }
 
     let token_var = format!("$POSTAGENT.{}.TOKEN", site.to_uppercase());
     println!(
@@ -756,17 +761,30 @@ fn prompt_and_save_legacy(site: &str) -> Result<(), Box<dyn std::error::Error>> 
 // ---------- Subcommands ----------
 
 pub fn logout(site: &str) -> Result<(), Box<dyn std::error::Error>> {
-    token::logout(&site.to_lowercase())?;
-    println!("Logged out of {}.", site.to_lowercase());
+    let site_lower = site.to_lowercase();
+    if let Some(provider) = token::provider_for_site(&site_lower) {
+        eprintln!(
+            "Warning: {} shares provider credentials for \"{}\". Logging out here will also clear shared tokens for sibling sites using that provider.",
+            site_lower, provider
+        );
+    }
+    token::logout(&site_lower)?;
+    println!("Logged out of {}.", site_lower);
     Ok(())
 }
 
 pub fn reset(site: &str) -> Result<(), Box<dyn std::error::Error>> {
-    token::reset(&site.to_lowercase())?;
+    let site_lower = site.to_lowercase();
+    if let Some(provider) = token::provider_for_site(&site_lower) {
+        eprintln!(
+            "Warning: {} shares provider credentials for \"{}\". Resetting here will also clear shared app credentials and tokens for sibling sites using that provider.",
+            site_lower, provider
+        );
+    }
+    token::reset(&site_lower)?;
     println!(
         "Cleared OAuth app + tokens for {}. Run `postagent auth {}` to re-register.",
-        site.to_lowercase(),
-        site.to_lowercase()
+        site_lower, site_lower
     );
     Ok(())
 }
@@ -1210,5 +1228,15 @@ mod tests {
     #[test]
     fn validate_static_secret_trims_surrounding_whitespace() {
         assert_eq!(validate_static_secret("  secret  ").unwrap(), "secret");
+    }
+
+    #[test]
+    fn logout_warning_mentions_shared_provider_scope() {
+        let msg = format!(
+            "Warning: {} shares provider credentials for \"{}\". Logging out here will also clear shared tokens for sibling sites using that provider.",
+            "google-docs", "google"
+        );
+        assert!(msg.contains("sibling sites"));
+        assert!(msg.contains("shared tokens"));
     }
 }
