@@ -37,18 +37,20 @@ impl std::fmt::Display for LoopbackError {
 
 impl std::error::Error for LoopbackError {}
 
-/// Binds to `127.0.0.1:9876`, accepts one valid `GET /callback?...` request,
-/// returns the query-string params. Non-callback / malformed hits are ignored
-/// until timeout.
-pub fn listen_for_callback(timeout: Duration) -> Result<CallbackData, LoopbackError> {
-    let listener = TcpListener::bind(REDIRECT_ADDR).map_err(|e| {
+pub fn bind_callback_listener() -> Result<TcpListener, LoopbackError> {
+    TcpListener::bind(REDIRECT_ADDR).map_err(|e| {
         if e.kind() == std::io::ErrorKind::AddrInUse {
             LoopbackError::PortInUse
         } else {
             LoopbackError::Io(e)
         }
-    })?;
+    })
+}
 
+pub fn wait_for_callback_on(
+    listener: TcpListener,
+    timeout: Duration,
+) -> Result<CallbackData, LoopbackError> {
     // Non-blocking accept with a bounded deadline: simpler than threading, and
     // works fine for a single callback. Ctrl-C bypasses this through the OS
     // default SIGINT handler (exit 130).
@@ -364,7 +366,7 @@ fn success_page() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io;
+    use std::io::{self, Read, Write};
 
     struct ChunkedReader {
         chunks: Vec<Vec<u8>>,
@@ -458,5 +460,27 @@ mod tests {
         assert_eq!(url_decode("hello%20world"), "hello world");
         assert_eq!(url_decode("a+b"), "a b");
         assert_eq!(url_decode("%2F"), "/");
+    }
+
+    #[test]
+    fn wait_for_callback_accepts_prebound_listener() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let sender = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            let mut stream = std::net::TcpStream::connect(addr).unwrap();
+            stream
+                .write_all(b"GET /callback?code=abc&state=xyz HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                .unwrap();
+            let mut buf = [0u8; 256];
+            let _ = stream.read(&mut buf);
+        });
+
+        let data = wait_for_callback_on(listener, Duration::from_secs(1)).unwrap();
+        sender.join().unwrap();
+
+        assert_eq!(data.code.as_deref(), Some("abc"));
+        assert_eq!(data.state.as_deref(), Some("xyz"));
     }
 }

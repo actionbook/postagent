@@ -58,18 +58,22 @@ pub fn run_authorization_code_flow(
     )?;
 
     // Bind the port BEFORE nudging the user / opening the browser so "port in
-    // use" fails fast without confusing the user about what happened.
-    // `listen_for_callback` binds inside, but we'd prefer to pre-bind for the
-    // better error. However, pre-binding + rebinding in the helper would
-    // conflict — so just let `listen_for_callback` own binding and surface
-    // PortInUse as a clear error with exit 1 in the caller.
+    // use" or an immediate provider redirect cannot race the listener.
+    let listener = if params.dry_run {
+        None
+    } else {
+        Some(loopback::bind_callback_listener()?)
+    };
 
     match present_authorize_url(&authorize_url, params)? {
         AuthorizeUrlNextStep::DryRun => return Ok(AuthorizationCodeFlowOutcome::DryRun),
         AuthorizeUrlNextStep::AwaitCallback => {}
     }
 
-    let cb = loopback::listen_for_callback(params.timeout)?;
+    let cb = loopback::wait_for_callback_on(
+        listener.expect("listener is bound unless dry-run returned early"),
+        params.timeout,
+    )?;
 
     if let Some(err) = cb.error {
         let desc = cb.error_description.unwrap_or_default();

@@ -596,6 +596,13 @@ fn validate_nonblank_value<'a>(
     Ok(trimmed)
 }
 
+fn matching_saved_oauth_app<'a>(
+    existing_app: Option<&'a AppConfig>,
+    method_id: &str,
+) -> Option<&'a AppConfig> {
+    existing_app.filter(|app| app.method_id == method_id)
+}
+
 fn handle_oauth2(
     site: &str,
     method: &descriptor::OAuth2AuthMethod,
@@ -625,11 +632,12 @@ fn handle_oauth2(
     let existing_app = provider
         .and_then(token::load_provider_app)
         .or_else(|| token::load_app(site));
+    let matching_app = matching_saved_oauth_app(existing_app.as_ref(), &method.id);
     let desc_hash = descriptor::descriptor_hash(&AuthMethod::Oauth2(method.clone()));
 
     let client_id = match args.client_id {
         Some(c) => c.to_string(),
-        None => match existing_app.as_ref().filter(|a| a.method_id == method.id) {
+        None => match matching_app {
             Some(a) => a.client_id.clone(),
             None => read_secret("Client ID: ")?,
         },
@@ -639,8 +647,7 @@ fn handle_oauth2(
     let client_secret: Option<String> = if method.client.client_type == "confidential" {
         let raw = match args.client_secret {
             Some(s) => s.to_string(),
-            None => match existing_app
-                .as_ref()
+            None => match matching_app
                 .and_then(|a| a.client_secret.clone())
                 .filter(|_| args.client_id.is_none())
             {
@@ -1361,6 +1368,25 @@ mod tests {
         assert_eq!(
             validate_nonblank_value("  client-id  ", "unused").unwrap(),
             "client-id"
+        );
+    }
+
+    #[test]
+    fn matching_saved_oauth_app_requires_same_method_id() {
+        let app = AppConfig {
+            method_id: "pat".into(),
+            client_id: "cid".into(),
+            client_secret: Some("secret".into()),
+            descriptor_hash: "hhhhhhhhhhhhhhhh".into(),
+        };
+
+        assert!(matching_saved_oauth_app(Some(&app), "oauth").is_none());
+        assert_eq!(
+            matching_saved_oauth_app(Some(&app), "pat")
+                .unwrap()
+                .client_secret
+                .as_deref(),
+            Some("secret")
         );
     }
 
