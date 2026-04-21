@@ -1,6 +1,6 @@
 {
   "name": "postagent-linux-arm64-gnu",
-  "version": "0.2.3",
+  "version": "0.3.0",
   "description": "Postagent CLI native binary for Linux ARM64 (glibc)",
   "os": [
     "linux"
