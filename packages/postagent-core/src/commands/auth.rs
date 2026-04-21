@@ -595,13 +595,7 @@ fn handle_oauth2(
         Some(c) => c.to_string(),
         None => match existing_app.as_ref().filter(|a| a.method_id == method.id) {
             Some(a) => a.client_id.clone(),
-            None => {
-                eprint!("Press Enter to continue, Ctrl-C to cancel.");
-                io::stderr().flush()?;
-                let mut s = String::new();
-                io::stdin().lock().read_line(&mut s).ok();
-                read_secret("Client ID: ")?
-            }
+            None => read_secret("Client ID: ")?,
         },
     };
     if client_id.is_empty() {
@@ -758,20 +752,29 @@ fn collect_placeholders(
     let mut out: BTreeMap<String, String> = flag_pairs.iter().cloned().collect();
     let required: &[String] = method.authorize.params_required.as_deref().unwrap_or(&[]);
     for key in required {
-        if out.contains_key(key) {
+        if let Some(value) = out.get_mut(key) {
+            *value = normalize_required_authorize_param(key, value)?;
             continue;
         }
         eprint!("{}: ", key);
         io::stderr().flush()?;
         let mut line = String::new();
         io::stdin().lock().read_line(&mut line)?;
-        let v = line.trim().to_string();
-        if v.is_empty() {
-            return Err(format!("authorize parameter `{}` is required", key).into());
-        }
+        let v = normalize_required_authorize_param(key, &line)?;
         out.insert(key.clone(), v);
     }
     Ok(out)
+}
+
+fn normalize_required_authorize_param(
+    key: &str,
+    value: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(format!("authorize parameter `{}` is required", key).into());
+    }
+    Ok(trimmed.to_string())
 }
 
 fn prompt_and_save_legacy(site: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -1290,6 +1293,22 @@ mod tests {
         assert_eq!(
             chosen,
             vec!["repo".to_string(), "offline_access".to_string()]
+        );
+    }
+
+    #[test]
+    fn normalize_required_authorize_param_rejects_blank_values() {
+        let err = normalize_required_authorize_param("tenant", "   ")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("authorize parameter `tenant` is required"));
+    }
+
+    #[test]
+    fn normalize_required_authorize_param_trims_non_blank_values() {
+        assert_eq!(
+            normalize_required_authorize_param("tenant", "  acme  ").unwrap(),
+            "acme"
         );
     }
 }
