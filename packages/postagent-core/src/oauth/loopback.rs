@@ -3,6 +3,7 @@ use std::net::TcpListener;
 use std::time::Duration;
 
 pub const REDIRECT_ADDR: &str = "127.0.0.1:9876";
+const MAX_REQUEST_LINE_BYTES: usize = 8192;
 
 /// Result of a successful callback hit.
 #[derive(Debug, Clone)]
@@ -103,13 +104,30 @@ pub fn listen_for_callback(timeout: Duration) -> Result<CallbackData, LoopbackEr
 }
 
 fn read_request_line(stream: &mut std::net::TcpStream) -> Option<String> {
-    let mut buf = [0u8; 4096];
-    let n = stream.read(&mut buf).ok()?;
-    if n == 0 {
-        return None;
+    read_request_line_from(stream)
+}
+
+fn read_request_line_from<R: Read>(reader: &mut R) -> Option<String> {
+    let mut buf = Vec::with_capacity(1024);
+    let mut chunk = [0u8; 1024];
+
+    loop {
+        let n = reader.read(&mut chunk).ok()?;
+        if n == 0 {
+            return None;
+        }
+
+        buf.extend_from_slice(&chunk[..n]);
+        if buf.len() > MAX_REQUEST_LINE_BYTES {
+            return None;
+        }
+
+        if let Some(end) = buf.windows(2).position(|window| window == b"\r\n") {
+            return std::str::from_utf8(&buf[..end])
+                .ok()
+                .map(std::string::ToString::to_string);
+        }
     }
-    let text = std::str::from_utf8(&buf[..n]).ok()?;
-    text.lines().next().map(|s| s.to_string())
 }
 
 /// Parse `GET /callback?code=X&state=Y HTTP/1.1` → [("code","X"),("state","Y")].
@@ -296,6 +314,24 @@ fn success_page() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io;
+
+    struct ChunkedReader {
+        chunks: Vec<Vec<u8>>,
+        next: usize,
+    }
+
+    impl Read for ChunkedReader {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if self.next >= self.chunks.len() {
+                return Ok(0);
+            }
+            let chunk = &self.chunks[self.next];
+            self.next += 1;
+            buf[..chunk.len()].copy_from_slice(chunk);
+            Ok(chunk.len())
+        }
+    }
 
     #[test]
     fn parse_query_basic() {
@@ -321,6 +357,20 @@ mod tests {
     fn parse_query_empty() {
         assert!(parse_query_from_request_line("GET / HTTP/1.1").is_empty());
         assert!(parse_query_from_request_line("").is_empty());
+    }
+
+    #[test]
+    fn read_request_line_handles_partial_reads() {
+        let mut reader = ChunkedReader {
+            chunks: vec![
+                b"GET /callback?code=abc".to_vec(),
+                b"&state=xyz HTTP/1.1\r\nHost: localhost\r\n\r\n".to_vec(),
+            ],
+            next: 0,
+        };
+
+        let line = read_request_line_from(&mut reader).unwrap();
+        assert_eq!(line, "GET /callback?code=abc&state=xyz HTTP/1.1");
     }
 
     #[test]

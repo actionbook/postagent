@@ -83,6 +83,22 @@ struct ProviderPointer {
     provider: String,
 }
 
+fn normalize_provider_name(provider: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let name = provider.trim();
+    if name.is_empty() {
+        return Err("provider name cannot be empty".into());
+    }
+    if !name
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+    {
+        return Err(
+            "provider name must use only ASCII letters, digits, '-' or '_'".into(),
+        );
+    }
+    Ok(name.to_lowercase())
+}
+
 fn token_dir_with_base(base: &Path, site: &str) -> PathBuf {
     base.join(".postagent")
         .join("profiles")
@@ -111,12 +127,7 @@ fn load_provider_pointer(base: &Path, site: &str) -> Option<String> {
     let path = provider_pointer_file(base, site);
     let content = fs::read_to_string(&path).ok()?;
     let p: ProviderPointer = serde_yaml::from_str(&content).ok()?;
-    let name = p.provider.trim().to_string();
-    if name.is_empty() {
-        None
-    } else {
-        Some(name)
-    }
+    normalize_provider_name(&p.provider).ok()
 }
 
 /// Storage directory that actually holds this site's `auth.yaml` / `app.yaml`.
@@ -381,12 +392,9 @@ fn save_provider_pointer_to(
     site: &str,
     provider: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let name = provider.trim();
-    if name.is_empty() {
-        return Err("provider name cannot be empty".into());
-    }
+    let name = normalize_provider_name(provider)?;
     let body = serde_yaml::to_string(&ProviderPointer {
-        provider: name.to_string(),
+        provider: name,
     })?;
     // Pointer always lives inside the site's own dir — it must NOT route
     // through effective_auth_dir, or we'd recurse into the provider dir
@@ -735,6 +743,42 @@ mod tests {
             .mode()
             & 0o777;
         assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn provider_pointer_rejects_unsafe_provider_ids() {
+        let tmp = TempDir::new().unwrap();
+        let base = tmp.path();
+
+        for provider in ["", "   ", "../google", "google/drive", "google.drive"] {
+            let err = save_provider_pointer_to(base, "google-drive", provider).unwrap_err();
+            assert!(err.to_string().contains("provider name"));
+        }
+        assert!(!provider_pointer_file(base, "google-drive").exists());
+    }
+
+    #[test]
+    fn invalid_provider_pointer_file_is_ignored() {
+        let tmp = TempDir::new().unwrap();
+        let base = tmp.path();
+
+        fs::create_dir_all(token_dir_with_base(base, "google-drive")).unwrap();
+        fs::write(
+            provider_pointer_file(base, "google-drive"),
+            "provider: ../../tmp/x\n",
+        )
+        .unwrap();
+
+        let mut auth = AuthFile::default();
+        auth.kind = Some(AuthKind::Oauth2);
+        auth.access_token = Some("site-at".into());
+        save_auth_to(base, "google-drive", &auth).unwrap();
+
+        let loaded = load_auth_from(base, "google-drive").unwrap();
+        assert_eq!(loaded.access_token.as_deref(), Some("site-at"));
+        assert!(token_dir_with_base(base, "google-drive")
+            .join("auth.yaml")
+            .exists());
     }
 
     #[test]
