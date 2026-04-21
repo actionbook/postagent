@@ -11,6 +11,11 @@ use exchange::{ExchangeInputs, TokenResponse};
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+pub enum AuthorizationCodeFlowOutcome {
+    Authorized(TokenResponse),
+    DryRun,
+}
+
 pub struct AuthParams<'a> {
     pub client_id: &'a str,
     pub client_secret: Option<&'a str>,
@@ -22,12 +27,17 @@ pub struct AuthParams<'a> {
     pub timeout: Duration,
 }
 
+enum AuthorizeUrlNextStep {
+    AwaitCallback,
+    DryRun,
+}
+
 /// Runs the full authorization_code + PKCE flow against a single descriptor.
 /// On success returns the parsed token response.
 pub fn run_authorization_code_flow(
     method: &OAuth2AuthMethod,
     params: &AuthParams<'_>,
-) -> Result<TokenResponse, Box<dyn std::error::Error>> {
+) -> Result<AuthorizationCodeFlowOutcome, Box<dyn std::error::Error>> {
     let pkce = pkce::generate();
     let state_tok = state::generate();
 
@@ -54,27 +64,9 @@ pub fn run_authorization_code_flow(
     // conflict — so just let `listen_for_callback` own binding and surface
     // PortInUse as a clear error with exit 1 in the caller.
 
-    eprintln!("Authorize URL prepared.");
-    eprintln!(
-        "Listening for callback ({}s timeout):",
-        params.timeout.as_secs()
-    );
-    eprintln!("{}", REDIRECT_URI);
-    if params.dry_run {
-        let path = browser::write_manual_url(&authorize_url)?;
-        eprintln!(
-            "(dry run — authorize URL written to {}. Open it manually to complete the flow)",
-            path.display()
-        );
-    } else {
-        eprintln!("Opening browser ...");
-        if !browser::open(&authorize_url) {
-            let path = browser::write_manual_url(&authorize_url)?;
-            eprintln!(
-                "Could not open a browser. Authorize URL written to {}.",
-                path.display()
-            );
-        }
+    match present_authorize_url(&authorize_url, params)? {
+        AuthorizeUrlNextStep::DryRun => return Ok(AuthorizationCodeFlowOutcome::DryRun),
+        AuthorizeUrlNextStep::AwaitCallback => {}
     }
 
     let cb = loopback::listen_for_callback(params.timeout)?;
@@ -83,6 +75,7 @@ pub fn run_authorization_code_flow(
         let desc = cb.error_description.unwrap_or_default();
         return Err(format!("OAuth authorization failed: {} {}", err, desc).into());
     }
+
     let code = cb
         .code
         .ok_or("OAuth callback did not include a ?code parameter")?;
@@ -100,7 +93,37 @@ pub fn run_authorization_code_flow(
         redirect_uri: REDIRECT_URI,
     })?;
 
-    Ok(tokens)
+    Ok(AuthorizationCodeFlowOutcome::Authorized(tokens))
+}
+
+fn present_authorize_url(
+    authorize_url: &str,
+    params: &AuthParams<'_>,
+) -> Result<AuthorizeUrlNextStep, Box<dyn std::error::Error>> {
+    eprintln!("Authorize URL prepared.");
+    if params.dry_run {
+        let path = browser::write_manual_url(authorize_url)?;
+        eprintln!(
+            "(dry run — authorize URL written to {}. Re-run without --dry-run to wait for the callback.)",
+            path.display()
+        );
+        return Ok(AuthorizeUrlNextStep::DryRun);
+    }
+
+    eprintln!(
+        "Listening for callback ({}s timeout):",
+        params.timeout.as_secs()
+    );
+    eprintln!("{}", REDIRECT_URI);
+    eprintln!("Opening browser ...");
+    if !browser::open(authorize_url) {
+        let path = browser::write_manual_url(authorize_url)?;
+        eprintln!(
+            "Could not open a browser. Authorize URL written to {}.",
+            path.display()
+        );
+    }
+    Ok(AuthorizeUrlNextStep::AwaitCallback)
 }
 
 fn build_authorize_url(
@@ -307,5 +330,20 @@ mod tests {
         let m = make_method(None);
         let url = build_authorize_url(&m, "cid", "st", "chal", "", &BTreeMap::new()).unwrap();
         assert!(!url.contains("scope="));
+    }
+
+    #[test]
+    fn dry_run_returns_before_waiting_for_callback() {
+        let params = AuthParams {
+            client_id: "cid",
+            client_secret: None,
+            scopes_override: None,
+            placeholder_values: BTreeMap::new(),
+            dry_run: true,
+            timeout: Duration::from_millis(1),
+        };
+
+        let outcome = run_authorization_code_flow(&make_method(None), &params).unwrap();
+        assert!(matches!(outcome, AuthorizationCodeFlowOutcome::DryRun));
     }
 }

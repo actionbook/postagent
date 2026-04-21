@@ -19,10 +19,11 @@ feat(auth): add OAuth 2.0 support with BYO apps, multi-method selection, and bac
 - Provider-backed OAuth keeps the old site-local credentials active until the browser flow succeeds, then links the site into shared provider storage; switching that site back to a static token detaches it from the shared provider store instead of overwriting sibling sites' shared OAuth tokens, and `logout` / `reset` now warn when they will clear shared provider credentials for sibling sites.
 - `postagent auth <site> --token` and the interactive static-token prompts reject blank / whitespace-only credentials before writing `auth.yaml`.
 - Required OAuth `--param key=value` inputs now fail fast when the value is blank, and the `client_id` prompt no longer consumes an extra stdin line before reading piped credentials.
-- `postagent auth <site> --dry-run` and browser-open failures now write the full authorize URL to a 0600 temp file instead of echoing it to stderr.
+- `postagent auth <site> --dry-run` and browser-open failures now write the full authorize URL to a 0600 temp file instead of echoing it to stderr, and `--dry-run` exits immediately instead of waiting for a localhost callback that will never arrive.
 - OAuth scope selection supports an interactive multi-select picker, preserves default scopes even when the registry catalog is incomplete, and the CLI prints the final scope set before opening the browser.
 - OAuth descriptor `authorize.extra_params` can add provider-specific query params, but it can no longer override reserved OAuth safety params like `state`, `redirect_uri`, or `code_challenge`.
 - Interactive OAuth pickers now buffer split arrow-key escape sequences before treating `Esc` as cancel, so slow terminals do not accidentally dismiss the method or scope selector.
 - The local loopback callback listener now ignores stray localhost hits that are not valid `/callback` OAuth responses instead of failing the auth flow early.
-- `postagent manual <site>` renders every advertised auth method with the right template per method (bearer headers for static, OAuth `inject.value_template`, and `$POSTAGENT.<SITE>.EXTRAS.<NAME>` for extra token fields).
+- Invalid `auth_methods` payloads from `/api/manual` now fail fast instead of silently downgrading OAuth sites into the legacy static-token prompt flow.
+- `postagent manual <site>` renders every advertised auth method with the right template per method, including OAuth `injects[].in` locations for headers, query params, and cookies, plus `$POSTAGENT.<SITE>.EXTRAS.<NAME>` for extra token fields.
 - `$POSTAGENT.<SITE>.TOKEN.EXTRA`-style typos now fail fast; only `EXTRAS.<NAME>` accepts a suffix.

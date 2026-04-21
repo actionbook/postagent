@@ -703,7 +703,16 @@ fn handle_oauth2(
         timeout: Duration::from_secs(120),
     };
 
-    let tokens = oauth::run_authorization_code_flow(method, &params)?;
+    let tokens = match oauth::run_authorization_code_flow(method, &params)? {
+        oauth::AuthorizationCodeFlowOutcome::Authorized(tokens) => tokens,
+        oauth::AuthorizationCodeFlowOutcome::DryRun => {
+            println!(
+                "\nDry run complete for {}. App credentials were saved, but no OAuth tokens were stored.",
+                site
+            );
+            return Ok(());
+        }
+    };
 
     let now = chrono::Utc::now();
     let auth = AuthFile {

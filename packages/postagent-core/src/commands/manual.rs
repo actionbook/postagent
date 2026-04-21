@@ -328,6 +328,18 @@ fn render_oauth_value_template(site: &str, template: &str) -> String {
         .into_owned()
 }
 
+fn format_injection_hint(location: &str, name: &str, rendered: &str) -> String {
+    if location.eq_ignore_ascii_case("header") {
+        format!("{}: {}", name, rendered)
+    } else if location.eq_ignore_ascii_case("query") {
+        format!("query {}={}", name, rendered)
+    } else if location.eq_ignore_ascii_case("cookie") {
+        format!("cookie {}={}", name, rendered)
+    } else {
+        format!("{} {}={}", location, name, rendered)
+    }
+}
+
 /// Per design §8.3: render one line per method describing how to inject the
 /// credential, using `$POSTAGENT.<SITE>.*` templates. When an OAuth method
 /// declares multiple `injects` entries (Shopify, Slack dual, Feishu), each is
@@ -338,17 +350,18 @@ fn render_method_line(method: &crate::descriptor::AuthMethod, site: &str) -> Str
     match method {
         AuthMethod::Static(s) => {
             let key_var = format!("$POSTAGENT.{}.API_KEY", upper);
-            if let Some(tmpl) = &s.value_template {
+            let rendered = if let Some(tmpl) = &s.value_template {
                 let rendered = tmpl.replace("{{token}}", &key_var);
-                format!("{}: {}", s.name, rendered)
+                rendered
             } else if s.scheme == "bearer"
                 && s.location == "header"
                 && s.name.eq_ignore_ascii_case("Authorization")
             {
-                format!("{}: Bearer {}", s.name, key_var)
+                format!("Bearer {}", key_var)
             } else {
-                format!("{}: {}", s.name, key_var)
-            }
+                key_var
+            };
+            format_injection_hint(&s.location, &s.name, &rendered)
         }
         AuthMethod::Oauth2(o) => {
             let lines: Vec<String> = o
@@ -356,7 +369,7 @@ fn render_method_line(method: &crate::descriptor::AuthMethod, site: &str) -> Str
                 .iter()
                 .map(|inj| {
                     let rendered = render_oauth_value_template(site, &inj.value_template);
-                    format!("{}: {}", inj.name, rendered)
+                    format_injection_hint(&inj.location, &inj.name, &rendered)
                 })
                 .collect();
             lines.join("\n             ")
@@ -432,6 +445,24 @@ fn format_send_hint(
 /// Fetches the site-level manual response and returns `auth_methods` if present.
 /// Used by `postagent auth <site>` to dispatch on the descriptor. Returns
 /// `Ok(None)` when the server didn't include `auth_methods` (legacy server).
+fn parse_auth_methods_payload(
+    data: serde_json::Value,
+) -> Result<Option<Vec<crate::descriptor::AuthMethod>>, Box<dyn std::error::Error>> {
+    #[derive(serde::Deserialize)]
+    struct AuthOnly {
+        #[serde(default)]
+        auth_methods: Option<Vec<crate::descriptor::AuthMethod>>,
+    }
+
+    let parsed: AuthOnly = serde_json::from_value(data).map_err(|e| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("manual auth_methods payload is invalid: {}", e),
+        )
+    })?;
+    Ok(parsed.auth_methods)
+}
+
 pub fn fetch_site_auth_methods(
     site: &str,
 ) -> Result<Option<Vec<crate::descriptor::AuthMethod>>, Box<dyn std::error::Error>> {
@@ -457,15 +488,7 @@ pub fn fetch_site_auth_methods(
 
     let body_text = response.text()?;
     let data = crate::api_response::unwrap_data(serde_json::from_str(&body_text)?);
-
-    // Parse just the fields we need — avoid depending on the rest of the shape.
-    #[derive(serde::Deserialize)]
-    struct AuthOnly {
-        #[serde(default)]
-        auth_methods: Option<Vec<crate::descriptor::AuthMethod>>,
-    }
-    let parsed: AuthOnly = serde_json::from_value(data).unwrap_or(AuthOnly { auth_methods: None });
-    Ok(parsed.auth_methods)
+    parse_auth_methods_payload(data)
 }
 
 fn format_site_overview(data: &SiteOverview) -> String {
@@ -1275,6 +1298,69 @@ mod tests {
         assert!(out.contains("Authorization: Bearer $POSTAGENT.SLACK.TOKEN"));
         assert!(out.contains("X-Workspace-Id: $POSTAGENT.SLACK.EXTRAS.WORKSPACE_ID"));
         assert!(!out.contains("{{workspace_id}}"));
+    }
+
+    #[test]
+    fn site_overview_oauth_site_renders_query_and_cookie_inject_locations() {
+        let data: SiteOverview = serde_json::from_value(json!({
+            "name": "figma",
+            "description": "",
+            "authentication": null,
+            "auth_methods": [{
+                "kind": "oauth2",
+                "id": "oauth",
+                "label": "OAuth",
+                "grants": ["authorization_code"],
+                "client": { "type": "public" },
+                "authorize": { "url": "https://www.figma.com/oauth" },
+                "token": {
+                    "url": "https://api.figma.com/v1/oauth/token",
+                    "body_encoding": "form",
+                    "client_auth": "either",
+                    "response_map": {
+                        "access_token": "/access_token",
+                        "extras": { "session_id": "/session_id" }
+                    }
+                },
+                "scopes": { "default": [], "separator": " " },
+                "refresh": { "behavior": "reusable" },
+                "injects": [
+                    { "in": "query", "name": "access_token", "value_template": "{{access_token}}" },
+                    { "in": "cookie", "name": "figma-session", "value_template": "{{session_id}}" }
+                ]
+            }],
+            "groups": []
+        }))
+        .unwrap();
+
+        let out = format_site_overview(&data);
+        assert!(out.contains("query access_token=$POSTAGENT.FIGMA.TOKEN"));
+        assert!(out.contains("cookie figma-session=$POSTAGENT.FIGMA.EXTRAS.SESSION_ID"));
+        assert!(!out.contains("access_token: $POSTAGENT.FIGMA.TOKEN"));
+    }
+
+    #[test]
+    fn parse_auth_methods_payload_returns_none_when_field_is_missing() {
+        let parsed = parse_auth_methods_payload(json!({
+            "name": "github",
+            "description": "legacy payload"
+        }))
+        .unwrap();
+
+        assert!(parsed.is_none());
+    }
+
+    #[test]
+    fn parse_auth_methods_payload_rejects_invalid_auth_methods_shape() {
+        let err = parse_auth_methods_payload(json!({
+            "auth_methods": {
+                "kind": "oauth2"
+            }
+        }))
+        .unwrap_err()
+        .to_string();
+
+        assert!(err.contains("manual auth_methods payload is invalid"));
     }
 
     #[test]
