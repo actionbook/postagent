@@ -38,7 +38,14 @@ pub fn run_authorization_code_flow(
     let sep = method.scopes.separator.as_str();
     let scope_str = scopes.join(sep);
 
-    let authorize_url = build_authorize_url(method, params.client_id, &state_tok, &pkce.challenge, &scope_str, &params.placeholder_values)?;
+    let authorize_url = build_authorize_url(
+        method,
+        params.client_id,
+        &state_tok,
+        &pkce.challenge,
+        &scope_str,
+        &params.placeholder_values,
+    )?;
 
     // Bind the port BEFORE nudging the user / opening the browser so "port in
     // use" fails fast without confusing the user about what happened.
@@ -47,18 +54,27 @@ pub fn run_authorization_code_flow(
     // conflict — so just let `listen_for_callback` own binding and surface
     // PortInUse as a clear error with exit 1 in the caller.
 
-    // URLs go on their own lines with no surrounding prose so a triple-click
-    // / select-line copies cleanly. The human label goes on the line above.
-    eprintln!("Will open in browser:");
-    eprintln!("{}", authorize_url);
-    eprintln!();
-    eprintln!("Listening for callback ({}s timeout):", params.timeout.as_secs());
+    eprintln!("Authorize URL prepared.");
+    eprintln!(
+        "Listening for callback ({}s timeout):",
+        params.timeout.as_secs()
+    );
     eprintln!("{}", REDIRECT_URI);
     if params.dry_run {
-        eprintln!("(dry run — browser not launched; open the authorize URL manually to complete the flow)");
+        let path = browser::write_manual_url(&authorize_url)?;
+        eprintln!(
+            "(dry run — authorize URL written to {}. Open it manually to complete the flow)",
+            path.display()
+        );
     } else {
         eprintln!("Opening browser ...");
-        browser::open(&authorize_url);
+        if !browser::open(&authorize_url) {
+            let path = browser::write_manual_url(&authorize_url)?;
+            eprintln!(
+                "Could not open a browser. Authorize URL written to {}.",
+                path.display()
+            );
+        }
     }
 
     let cb = loopback::listen_for_callback(params.timeout)?;
@@ -175,7 +191,9 @@ mod tests {
             setup_instructions: None,
             provider: None,
             grants: vec!["authorization_code".into()],
-            client: ClientSpec { client_type: "public".into() },
+            client: ClientSpec {
+                client_type: "public".into(),
+            },
             authorize: AuthorizeSpec {
                 url: "https://example.com/auth".into(),
                 extra_params: extra,
@@ -202,7 +220,10 @@ mod tests {
                 refresh_magic_scope: None,
                 catalog: None,
             },
-            refresh: RefreshSpec { behavior: "reusable".into(), expiry_instructions: None },
+            refresh: RefreshSpec {
+                behavior: "reusable".into(),
+                expiry_instructions: None,
+            },
             injects: vec![InjectSpec {
                 location: "header".into(),
                 name: "Authorization".into(),

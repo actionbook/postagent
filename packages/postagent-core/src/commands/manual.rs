@@ -23,7 +23,10 @@ struct Authentication {
 #[serde(untagged)]
 enum SiteAction {
     Simple(String),
-    Detailed { name: String, summary: Option<String> },
+    Detailed {
+        name: String,
+        summary: Option<String>,
+    },
 }
 
 impl SiteAction {
@@ -236,9 +239,8 @@ fn extract_site_meta(data: &SiteOverview) -> SiteMeta {
     let header = {
         let re = regex::Regex::new(r"`([A-Z][a-zA-Z]+-Version)` header \(latest: `([^`]+)`\)").ok();
         re.and_then(|re| {
-            re.captures(description).map(|caps| {
-                format!("{}: {}", &caps[1], &caps[2])
-            })
+            re.captures(description)
+                .map(|caps| format!("{}: {}", &caps[1], &caps[2]))
         })
     };
 
@@ -248,13 +250,15 @@ fn extract_site_meta(data: &SiteOverview) -> SiteMeta {
         re.and_then(|re| re.find(description).map(|m| m.as_str().to_string()))
             .or_else(|| {
                 let re = regex::Regex::new(r"([a-z]+\.dev(?:/[^\s`\)]*[a-z])?)").ok()?;
-                re.find(description).map(|m| m.as_str().trim_end_matches('.').to_string())
+                re.find(description)
+                    .map(|m| m.as_str().trim_end_matches('.').to_string())
             })
     };
 
     if is_graphql {
         let endpoint = base_url.as_ref().map(|u| format!("POST {}", u));
-        let gql_auth = render_site_auth(&data.auth_methods, data.authentication.as_ref(), &data.name);
+        let gql_auth =
+            render_site_auth(&data.auth_methods, data.authentication.as_ref(), &data.name);
 
         SiteMeta {
             base_url: None,
@@ -308,6 +312,22 @@ fn render_site_auth(
     legacy.map(|a| format_auth_from_struct(a, site))
 }
 
+fn render_oauth_value_template(site: &str, template: &str) -> String {
+    let upper = site.to_uppercase();
+    let token_var = format!("$POSTAGENT.{}.TOKEN", upper);
+    regex::Regex::new(r"\{\{([A-Za-z0-9_]+)\}\}")
+        .unwrap()
+        .replace_all(template, |caps: &regex::Captures<'_>| {
+            let name = &caps[1];
+            if name == "access_token" {
+                token_var.clone()
+            } else {
+                format!("$POSTAGENT.{}.EXTRAS.{}", upper, name.to_uppercase())
+            }
+        })
+        .into_owned()
+}
+
 /// Per design §8.3: render one line per method describing how to inject the
 /// credential, using `$POSTAGENT.<SITE>.*` templates. When an OAuth method
 /// declares multiple `injects` entries (Shopify, Slack dual, Feishu), each is
@@ -331,12 +351,11 @@ fn render_method_line(method: &crate::descriptor::AuthMethod, site: &str) -> Str
             }
         }
         AuthMethod::Oauth2(o) => {
-            let token_var = format!("$POSTAGENT.{}.TOKEN", upper);
             let lines: Vec<String> = o
                 .injects
                 .iter()
                 .map(|inj| {
-                    let rendered = inj.value_template.replace("{{access_token}}", &token_var);
+                    let rendered = render_oauth_value_template(site, &inj.value_template);
                     format!("{}: {}", inj.name, rendered)
                 })
                 .collect();
@@ -516,9 +535,17 @@ fn format_site_overview(data: &SiteOverview) -> String {
                 output.push_str(&format!("    {}\n", line));
             }
         } else {
-            let max_name_width = render_actions.iter().map(|a| a.name().len()).max().unwrap_or(0);
+            let max_name_width = render_actions
+                .iter()
+                .map(|a| a.name().len())
+                .max()
+                .unwrap_or(0);
             for action in render_actions {
-                output.push_str(&format!("    {:<width$}\n", action.name(), width = max_name_width));
+                output.push_str(&format!(
+                    "    {:<width$}\n",
+                    action.name(),
+                    width = max_name_width
+                ));
             }
         }
 
@@ -527,9 +554,7 @@ fn format_site_overview(data: &SiteOverview) -> String {
         }
     }
 
-    output.push_str(
-        "\n  Run postagent manual <SITE> [GROUP] [ACTION] for full details.\n",
-    );
+    output.push_str("\n  Run postagent manual <SITE> [GROUP] [ACTION] for full details.\n");
     if let Some(first_group) = data.groups.first() {
         output.push_str(&format!(
             "  Example: postagent manual {} {}  # List actions in group\n",
@@ -538,7 +563,9 @@ fn format_site_overview(data: &SiteOverview) -> String {
         if let Some(first_action) = first_group.actions.first() {
             output.push_str(&format!(
                 "           postagent manual {} {} {}  # Get full details of action",
-                data.name, first_group.name, first_action.name()
+                data.name,
+                first_group.name,
+                first_action.name()
             ));
         }
     }
@@ -574,9 +601,7 @@ fn format_group_overview(data: &GroupOverview, site: &str) -> String {
         output.push_str(&format!("    {}\n", line));
     }
 
-    output.push_str(
-        "\n  Run postagent manual <SITE> [GROUP] [ACTION] for full details.\n",
-    );
+    output.push_str("\n  Run postagent manual <SITE> [GROUP] [ACTION] for full details.\n");
     if let Some(first_action) = data.actions.first() {
         output.push_str(&format!(
             "  Example: postagent manual {} {} {}  # Get full details of action",
@@ -635,7 +660,11 @@ fn walk_schema(
         let required_fields: std::collections::HashSet<String> = schema
             .get("required")
             .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default();
 
         for (field_name, field_schema) in props_obj {
@@ -731,7 +760,10 @@ fn describe_top_type_with_depth(schema: &serde_json::Value, walk_depth: usize) -
     let t = extract_type(schema);
     if t == "array" {
         if let Some(items) = schema.get("items") {
-            return format!("array<{}>", describe_top_type_with_depth(items, walk_depth + 1));
+            return format!(
+                "array<{}>",
+                describe_top_type_with_depth(items, walk_depth + 1)
+            );
         }
     }
     t
@@ -863,7 +895,10 @@ fn schema_constraints(schema: &serde_json::Value) -> Option<String> {
 }
 
 fn compose_description(schema: &serde_json::Value) -> String {
-    let desc = schema.get("description").and_then(|v| v.as_str()).unwrap_or("");
+    let desc = schema
+        .get("description")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     match (schema_constraints(schema), desc.is_empty()) {
         (Some(c), true) => c,
         (Some(c), false) => format!("{} {}", c, desc),
@@ -894,7 +929,9 @@ fn format_action_detail(data: &ActionDetail) -> String {
             output.push_str(&format!("  base_url:  {}\n", base_url));
         }
     }
-    if let Some(auth_line) = render_site_auth(&data.auth_methods, data.authentication.as_ref(), &data.site) {
+    if let Some(auth_line) =
+        render_site_auth(&data.auth_methods, data.authentication.as_ref(), &data.site)
+    {
         output.push_str(&format!("  auth:      {}\n", auth_line));
     }
 
@@ -911,7 +948,11 @@ fn format_action_detail(data: &ActionDetail) -> String {
 
     // Parameters
     if !data.parameters.is_empty() {
-        let header_label = if is_graphql { "## Arguments" } else { "## Parameters" };
+        let header_label = if is_graphql {
+            "## Arguments"
+        } else {
+            "## Parameters"
+        };
         output.push_str(&format!("\n  {}\n\n", header_label));
 
         let field_label = if is_graphql { "ARGUMENT" } else { "FIELD" };
@@ -926,7 +967,11 @@ fn format_action_detail(data: &ActionDetail) -> String {
             table_rows.push(vec![
                 p.name.clone(),
                 p.param_type.clone(),
-                if p.required { "yes".into() } else { "no".into() },
+                if p.required {
+                    "yes".into()
+                } else {
+                    "no".into()
+                },
                 p.description.clone(),
             ]);
         }
@@ -945,7 +990,10 @@ fn format_action_detail(data: &ActionDetail) -> String {
             if let Some(table) = format_schema_table(schema, REQUEST_SCHEMA_DEPTH) {
                 output.push_str(&table);
             } else if let Some(desc) = schema.get("description").and_then(|v| v.as_str()) {
-                let type_str = schema.get("type").and_then(|v| v.as_str()).unwrap_or("object");
+                let type_str = schema
+                    .get("type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("object");
                 output.push_str(&format!("  Type: {}\n", type_str));
                 output.push_str(&format!("  {}\n", desc));
             }
@@ -1088,7 +1136,9 @@ mod tests {
 
     #[test]
     fn format_site_overview_truncation() {
-        let actions: Vec<SiteAction> = (0..15).map(|i| SiteAction::Simple(format!("action_{}", i))).collect();
+        let actions: Vec<SiteAction> = (0..15)
+            .map(|i| SiteAction::Simple(format!("action_{}", i)))
+            .collect();
         let data = SiteOverview {
             name: "test".into(),
             description: "".into(),
@@ -1154,7 +1204,10 @@ mod tests {
 
         let out = format_site_overview(&data);
         assert!(out.contains("Authorization: Bearer $POSTAGENT.GMAIL.TOKEN"));
-        assert!(!out.contains("GMAIL.API_KEY"), "OAuth sites must not surface .API_KEY");
+        assert!(
+            !out.contains("GMAIL.API_KEY"),
+            "OAuth sites must not surface .API_KEY"
+        );
     }
 
     #[test]
@@ -1184,6 +1237,44 @@ mod tests {
         assert!(out.contains("[oauth]"));
         assert!(out.contains("$POSTAGENT.GITHUB.API_KEY"));
         assert!(out.contains("$POSTAGENT.GITHUB.TOKEN"));
+    }
+
+    #[test]
+    fn site_overview_oauth_site_renders_extras_templates() {
+        let data: SiteOverview = serde_json::from_value(json!({
+            "name": "slack",
+            "description": "",
+            "authentication": null,
+            "auth_methods": [{
+                "kind": "oauth2",
+                "id": "oauth",
+                "label": "OAuth",
+                "grants": ["authorization_code"],
+                "client": { "type": "public" },
+                "authorize": { "url": "https://slack.com/oauth/v2/authorize" },
+                "token": {
+                    "url": "https://slack.com/api/oauth.v2.access",
+                    "body_encoding": "form",
+                    "client_auth": "either",
+                    "response_map": {
+                        "access_token": "/access_token",
+                        "extras": { "workspace_id": "/team/id" }
+                    }
+                },
+                "scopes": { "default": [], "separator": " " },
+                "refresh": { "behavior": "reusable" },
+                "injects": [
+                    { "in": "header", "name": "Authorization", "value_template": "Bearer {{access_token}}" },
+                    { "in": "header", "name": "X-Workspace-Id", "value_template": "{{workspace_id}}" }
+                ]
+            }],
+            "groups": []
+        })).unwrap();
+
+        let out = format_site_overview(&data);
+        assert!(out.contains("Authorization: Bearer $POSTAGENT.SLACK.TOKEN"));
+        assert!(out.contains("X-Workspace-Id: $POSTAGENT.SLACK.EXTRAS.WORKSPACE_ID"));
+        assert!(!out.contains("{{workspace_id}}"));
     }
 
     #[test]
@@ -1318,12 +1409,18 @@ mod tests {
         })).unwrap();
 
         let output = format_action_detail(&data);
-        assert!(output.contains("Bearer $POSTAGENT.GMAIL.TOKEN"), "auth line must show .TOKEN");
+        assert!(
+            output.contains("Bearer $POSTAGENT.GMAIL.TOKEN"),
+            "auth line must show .TOKEN"
+        );
         assert!(
             output.contains("substitutes $POSTAGENT.GMAIL.TOKEN"),
             "send hint must also point to .TOKEN (was hardcoded to .API_KEY before fix)"
         );
-        assert!(!output.contains("GMAIL.API_KEY"), "OAuth-only site must never surface .API_KEY");
+        assert!(
+            !output.contains("GMAIL.API_KEY"),
+            "OAuth-only site must never surface .API_KEY"
+        );
     }
 
     #[test]
@@ -1416,7 +1513,10 @@ mod tests {
             ]
         });
         let table = format_schema_table(&schema, REQUEST_SCHEMA_DEPTH).expect("table");
-        assert!(table.contains("common"), "base property `common` must appear");
+        assert!(
+            table.contains("common"),
+            "base property `common` must appear"
+        );
         assert!(table.contains("Always present"));
         assert!(table.contains("id"), "base property `id` must appear");
         assert!(table.contains("variantField"), "variant field must appear");
@@ -1426,7 +1526,10 @@ mod tests {
         // shared/required parts read first.
         let common_pos = table.find("common").unwrap();
         let variant_pos = table.find("variantField").unwrap();
-        assert!(common_pos < variant_pos, "base props must precede variant fields");
+        assert!(
+            common_pos < variant_pos,
+            "base props must precede variant fields"
+        );
     }
 
     #[test]
@@ -1510,10 +1613,16 @@ mod tests {
         // TYPE column keeps the ref name, not an expanded object.
         let body_header = output.find("## Request Body").unwrap();
         let types_header = output.find("## Types").unwrap();
-        assert!(body_header < types_header, "Types section must come after Request Body");
+        assert!(
+            body_header < types_header,
+            "Types section must come after Request Body"
+        );
         let body_section = &output[body_header..types_header];
         assert!(body_section.contains("parent"));
-        assert!(body_section.contains("Parent"), "TYPE column should show the ref name");
+        assert!(
+            body_section.contains("Parent"),
+            "TYPE column should show the ref name"
+        );
 
         // Types section defines each referenced type, sorted alphabetically.
         let types_section = &output[types_header..];

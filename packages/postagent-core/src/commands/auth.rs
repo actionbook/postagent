@@ -22,7 +22,7 @@ pub fn login(args: LoginArgs<'_>) -> Result<(), Box<dyn std::error::Error>> {
 
     // Legacy fast path: --token forces a static save regardless of descriptor.
     if let Some(t) = args.token {
-        return save_static(&site_lower, "default", t.trim());
+        return save_static(&site_lower, "default", t);
     }
 
     // Fetch descriptor; fall back to the pre-Phase-1 prompt flow if the server
@@ -56,7 +56,11 @@ fn select_method<'a>(
             format!(
                 "method id `{}` not found. Available: {}",
                 id,
-                methods.iter().map(|m| m.id()).collect::<Vec<_>>().join(", ")
+                methods
+                    .iter()
+                    .map(|m| m.id())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             )
         })?;
         return Ok(found);
@@ -338,10 +342,7 @@ fn select_scopes_interactive(
         libc::tcsetattr(fd, libc::TCSANOW, &t);
     }
 
-    let mut selected: Vec<bool> = catalog
-        .iter()
-        .map(|e| defaults.contains(&e.name))
-        .collect();
+    let mut selected: Vec<bool> = catalog.iter().map(|e| defaults.contains(&e.name)).collect();
 
     eprintln!("Select OAuth scopes (↑/↓ move, Space toggle, a = all, Enter confirm, Esc cancel):");
     eprintln!("  Defaults are pre-selected; the first row toggles every scope at once.");
@@ -441,11 +442,7 @@ fn toggle_all(selected: &mut [bool]) {
 }
 
 #[cfg(unix)]
-fn render_scope_menu(
-    catalog: &[descriptor::ScopeCatalogEntry],
-    selected: &[bool],
-    cursor: usize,
-) {
+fn render_scope_menu(catalog: &[descriptor::ScopeCatalogEntry], selected: &[bool], cursor: usize) {
     let all_on = selected.iter().all(|s| *s);
     let arrow = if cursor == 0 { "> " } else { "  " };
     let mark = if all_on { "✓" } else { " " };
@@ -489,7 +486,10 @@ fn handle_static(
     } else if let Some(url) = method.setup_url.as_deref() {
         eprintln!("Go to {} to find your API key or access token.", url);
     } else {
-        eprintln!("Go to the {} dashboard to find your API key or access token.", site);
+        eprintln!(
+            "Go to the {} dashboard to find your API key or access token.",
+            site
+        );
     }
 
     let prompt = format!(
@@ -497,11 +497,6 @@ fn handle_static(
         site
     );
     let secret = read_secret(&prompt)?;
-    if secret.is_empty() {
-        eprintln!("Error: credentials cannot be empty.");
-        std::process::exit(1);
-    }
-
     save_static(site, &method.id, &secret)
 }
 
@@ -510,6 +505,7 @@ fn save_static(
     method_id: &str,
     secret: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let secret = validate_static_secret(secret)?;
     let auth = AuthFile {
         kind: Some(AuthKind::Static),
         method_id: Some(method_id.to_string()),
@@ -524,6 +520,14 @@ fn save_static(
         key_var
     );
     Ok(())
+}
+
+fn validate_static_secret(secret: &str) -> Result<&str, Box<dyn std::error::Error>> {
+    let trimmed = secret.trim();
+    if trimmed.is_empty() {
+        return Err("Error: credentials cannot be empty.".into());
+    }
+    Ok(trimmed)
 }
 
 fn handle_oauth2(
@@ -719,11 +723,7 @@ fn collect_placeholders(
     flag_pairs: &[(String, String)],
 ) -> Result<BTreeMap<String, String>, Box<dyn std::error::Error>> {
     let mut out: BTreeMap<String, String> = flag_pairs.iter().cloned().collect();
-    let required: &[String] = method
-        .authorize
-        .params_required
-        .as_deref()
-        .unwrap_or(&[]);
+    let required: &[String] = method.authorize.params_required.as_deref().unwrap_or(&[]);
     for key in required {
         if out.contains_key(key) {
             continue;
@@ -750,10 +750,6 @@ fn prompt_and_save_legacy(site: &str) -> Result<(), Box<dyn std::error::Error>> 
         "Enter credentials (API key/access token) for \"{}\": ",
         site
     ))?;
-    if secret.is_empty() {
-        eprintln!("Error: credentials cannot be empty.");
-        std::process::exit(1);
-    }
     save_static(site, "default", &secret)
 }
 
@@ -790,8 +786,8 @@ pub fn reset(site: &str) -> Result<(), Box<dyn std::error::Error>> {
 ///     dead end, always give them a next step.
 pub fn scopes(site: &str) -> Result<(), Box<dyn std::error::Error>> {
     let site_lower = site.to_lowercase();
-    let methods = crate::commands::manual::fetch_site_auth_methods(&site_lower)?
-        .unwrap_or_default();
+    let methods =
+        crate::commands::manual::fetch_site_auth_methods(&site_lower)?.unwrap_or_default();
 
     let oauth_methods: Vec<&descriptor::OAuth2AuthMethod> = methods
         .iter()
@@ -830,8 +826,7 @@ pub fn scopes(site: &str) -> Result<(), Box<dyn std::error::Error>> {
         let granted: Option<Vec<String>> = local_auth
             .as_ref()
             .filter(|a| {
-                a.effective_kind() == AuthKind::Oauth2
-                    && a.effective_method_id() == method.id
+                a.effective_kind() == AuthKind::Oauth2 && a.effective_method_id() == method.id
             })
             .and_then(|a| a.scope.clone())
             .map(|s| {
@@ -867,16 +862,19 @@ pub fn scopes(site: &str) -> Result<(), Box<dyn std::error::Error>> {
                             g.iter().map(|s| s.as_str()).collect();
                         println!(
                             "  {:<3} {:<nw$}  {}",
-                            "", "SCOPE", "DESCRIPTION", nw = name_w
+                            "",
+                            "SCOPE",
+                            "DESCRIPTION",
+                            nw = name_w
                         );
                         for entry in catalog {
-                            let marker =
-                                if granted_set.contains(entry.name.as_str()) { "✓" } else { " " };
+                            let marker = if granted_set.contains(entry.name.as_str()) {
+                                "✓"
+                            } else {
+                                " "
+                            };
                             let desc = entry.description.as_deref().unwrap_or("—");
-                            println!(
-                                "  {:<3} {:<nw$}  {}",
-                                marker, entry.name, desc, nw = name_w
-                            );
+                            println!("  {:<3} {:<nw$}  {}", marker, entry.name, desc, nw = name_w);
                         }
                     }
                     None => {
@@ -884,12 +882,8 @@ pub fn scopes(site: &str) -> Result<(), Box<dyn std::error::Error>> {
                         // that are part of the default authorize request
                         // with a trailing literal "default" so the column
                         // can't be misread as a checkbox.
-                        let default_set: std::collections::BTreeSet<&str> = method
-                            .scopes
-                            .default
-                            .iter()
-                            .map(|s| s.as_str())
-                            .collect();
+                        let default_set: std::collections::BTreeSet<&str> =
+                            method.scopes.default.iter().map(|s| s.as_str()).collect();
                         let desc_w = catalog
                             .iter()
                             .map(|e| e.description.as_deref().unwrap_or("—").len())
@@ -897,7 +891,11 @@ pub fn scopes(site: &str) -> Result<(), Box<dyn std::error::Error>> {
                             .unwrap_or(0);
                         println!(
                             "  {:<nw$}  {:<dw$}  {}",
-                            "SCOPE", "DESCRIPTION", "", nw = name_w, dw = desc_w
+                            "SCOPE",
+                            "DESCRIPTION",
+                            "",
+                            nw = name_w,
+                            dw = desc_w
                         );
                         for entry in catalog {
                             let desc = entry.description.as_deref().unwrap_or("—");
@@ -908,7 +906,11 @@ pub fn scopes(site: &str) -> Result<(), Box<dyn std::error::Error>> {
                             };
                             println!(
                                 "  {:<nw$}  {:<dw$}  {}",
-                                entry.name, desc, tag, nw = name_w, dw = desc_w
+                                entry.name,
+                                desc,
+                                tag,
+                                nw = name_w,
+                                dw = desc_w
                             );
                         }
                     }
@@ -921,11 +923,15 @@ pub fn scopes(site: &str) -> Result<(), Box<dyn std::error::Error>> {
                 if let Some(g) = &granted {
                     let catalog_names: std::collections::BTreeSet<&str> =
                         catalog.iter().map(|e| e.name.as_str()).collect();
-                    let orphan: Vec<&String> =
-                        g.iter().filter(|s| !catalog_names.contains(s.as_str())).collect();
+                    let orphan: Vec<&String> = g
+                        .iter()
+                        .filter(|s| !catalog_names.contains(s.as_str()))
+                        .collect();
                     if !orphan.is_empty() {
                         println!();
-                        println!("  ! Granted but missing from catalog (spec author should update):");
+                        println!(
+                            "  ! Granted but missing from catalog (spec author should update):"
+                        );
                         for s in orphan {
                             println!("    ✓   {}", s);
                         }
@@ -941,7 +947,10 @@ pub fn scopes(site: &str) -> Result<(), Box<dyn std::error::Error>> {
                         "  default = included in the default authorize request (override with --scope)"
                     ),
                 }
-                println!("  Escalate with: postagent auth {} --scope <name> [...]", site_lower);
+                println!(
+                    "  Escalate with: postagent auth {} --scope <name> [...]",
+                    site_lower
+                );
                 println!(
                     "  Note: --scope OVERRIDES the default set; re-list any defaults you want to keep."
                 );
@@ -1190,5 +1199,16 @@ mod tests {
         assert!(matches!(classify_key(b""), KeyAction::Unknown));
         assert!(matches!(classify_key(b"x"), KeyAction::Unknown));
         assert!(matches!(classify_key(b"\x1b[Z"), KeyAction::Unknown)); // Shift+Tab
+    }
+
+    #[test]
+    fn validate_static_secret_rejects_whitespace_only_values() {
+        let err = validate_static_secret("   ").unwrap_err().to_string();
+        assert!(err.contains("cannot be empty"));
+    }
+
+    #[test]
+    fn validate_static_secret_trims_surrounding_whitespace() {
+        assert_eq!(validate_static_secret("  secret  ").unwrap(), "secret");
     }
 }

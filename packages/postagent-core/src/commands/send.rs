@@ -74,7 +74,10 @@ pub fn run(
     };
 
     let ua_key = "User-Agent";
-    if !merged_headers.keys().any(|k| k.eq_ignore_ascii_case(ua_key)) {
+    if !merged_headers
+        .keys()
+        .any(|k| k.eq_ignore_ascii_case(ua_key))
+    {
         merged_headers.insert(
             ua_key.to_string(),
             format!("postagent/{}", env!("CARGO_PKG_VERSION")),
@@ -87,9 +90,7 @@ pub fn run(
         merged_headers.insert("x-api-key".to_string(), api_key);
     }
 
-    let client = Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()?;
+    let client = Client::builder().timeout(Duration::from_secs(30)).build()?;
 
     let mut request = match http_method.as_str() {
         "GET" => client.get(&url),
@@ -113,7 +114,7 @@ pub fn run(
         Ok(resp) => resp,
         Err(e) => {
             if e.is_builder() {
-                eprintln!("Invalid URL: {}", url);
+                eprintln!("Invalid URL after template resolution.");
             } else {
                 eprintln!("{}", e);
             }
@@ -123,7 +124,6 @@ pub fn run(
 
     let status = response.status();
     let status_text = status.canonical_reason().unwrap_or("").to_string();
-    let response_url_host = extract_host(&url);
     let response_body = response.text()?;
 
     if status.is_success() || status.is_informational() || status.is_redirection() {
@@ -138,7 +138,6 @@ pub fn run(
             let mut inputs: Vec<&str> = vec![url_snap.as_str(), body_snap.as_str()];
             inputs.extend(header_refs);
             let sites = referenced_sites(&inputs);
-            eprintln!("HTTP {} from {}", status.as_u16(), response_url_host);
             if sites.is_empty() {
                 eprintln!("Your access token may be expired. Run: postagent auth <site>");
             } else if sites.len() == 1 {
@@ -157,16 +156,6 @@ pub fn run(
     }
 
     Ok(())
-}
-
-fn extract_host(url: &str) -> String {
-    // Strip scheme, then take up to the first slash or port colon.
-    let without_scheme = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
-    let host = without_scheme
-        .split(['/', '?', '#'])
-        .next()
-        .unwrap_or(without_scheme);
-    host.split(':').next().unwrap_or(host).to_string()
 }
 
 fn parse_header(raw: &str) -> HashMap<String, String> {
@@ -326,13 +315,6 @@ mod tests {
             "GET".to_string()
         };
         assert_eq!(http_method, "DELETE");
-    }
-
-    #[test]
-    fn extract_host_basic() {
-        assert_eq!(extract_host("https://api.notion.com/v1/pages"), "api.notion.com");
-        assert_eq!(extract_host("http://localhost:8080/x"), "localhost");
-        assert_eq!(extract_host("https://api.example.com"), "api.example.com");
     }
 
     #[test]

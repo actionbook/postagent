@@ -112,7 +112,11 @@ fn load_provider_pointer(base: &Path, site: &str) -> Option<String> {
     let content = fs::read_to_string(&path).ok()?;
     let p: ProviderPointer = serde_yaml::from_str(&content).ok()?;
     let name = p.provider.trim().to_string();
-    if name.is_empty() { None } else { Some(name) }
+    if name.is_empty() {
+        None
+    } else {
+        Some(name)
+    }
 }
 
 /// Storage directory that actually holds this site's `auth.yaml` / `app.yaml`.
@@ -230,6 +234,19 @@ fn resolve_template_variables_with_base(base: &Path, input: &str) -> Result<Stri
         let field = cap[2].to_string();
         let sub = cap.get(3).map(|m| m.as_str().to_string());
         let matched = cap[0].to_string();
+
+        if sub.is_some()
+            && matches!(
+                field.as_str(),
+                "API_KEY" | "ACCESS_TOKEN" | "TOKEN" | "REFRESH_TOKEN"
+            )
+        {
+            return Err(format!(
+                "$POSTAGENT.{}.{} does not accept a sub-field. Only EXTRAS.<NAME> supports a suffix.",
+                site.to_uppercase(),
+                field
+            ));
+        }
 
         let auth = load_auth_from(base, &site).ok_or_else(|| {
             format!(
@@ -354,11 +371,7 @@ fn load_app_from(base: &Path, site: &str) -> Option<AppConfig> {
     serde_yaml::from_str(&content).ok()
 }
 
-fn save_app_to(
-    base: &Path,
-    site: &str,
-    app: &AppConfig,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn save_app_to(base: &Path, site: &str, app: &AppConfig) -> Result<(), Box<dyn std::error::Error>> {
     let yaml = serde_yaml::to_string(app)?;
     atomic_write(&app_file(base, site), yaml.as_bytes())
 }
@@ -531,8 +544,8 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let base = tmp.path();
 
-        let err = resolve_template_variables_with_base(base, "$POSTAGENT.FOO.REFRESH_TOKEN")
-            .unwrap_err();
+        let err =
+            resolve_template_variables_with_base(base, "$POSTAGENT.FOO.REFRESH_TOKEN").unwrap_err();
         assert!(err.contains("REFRESH_TOKEN"));
     }
 
@@ -549,6 +562,14 @@ mod tests {
         let err = resolve_template_variables_with_base(base, "$POSTAGENT.FOO.EXTRAS.MISSING")
             .unwrap_err();
         assert!(err.contains("extras.missing"));
+    }
+
+    #[test]
+    fn non_extras_templates_reject_suffixes() {
+        let tmp = TempDir::new().unwrap();
+        let err = resolve_template_variables_with_base(tmp.path(), "$POSTAGENT.FOO.TOKEN.EXTRA")
+            .unwrap_err();
+        assert!(err.contains("does not accept a sub-field"));
     }
 
     #[test]
@@ -691,8 +712,8 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let base = tmp.path();
 
-        let err = resolve_template_variables_with_base(base, "$POSTAGENT.MISSING.API_KEY")
-            .unwrap_err();
+        let err =
+            resolve_template_variables_with_base(base, "$POSTAGENT.MISSING.API_KEY").unwrap_err();
         assert!(err.contains("Auth not found for \"missing\""));
         assert!(err.contains("postagent auth missing"));
     }
@@ -755,8 +776,12 @@ mod tests {
         let shared_app = providers_dir(base, "google").join("app.yaml");
         assert!(shared_auth.exists());
         assert!(shared_app.exists());
-        assert!(!token_dir_with_base(base, "google-drive").join("auth.yaml").exists());
-        assert!(!token_dir_with_base(base, "google-docs").join("auth.yaml").exists());
+        assert!(!token_dir_with_base(base, "google-drive")
+            .join("auth.yaml")
+            .exists());
+        assert!(!token_dir_with_base(base, "google-docs")
+            .join("auth.yaml")
+            .exists());
     }
 
     #[test]
@@ -801,9 +826,11 @@ mod tests {
         auth.access_token = Some("shared-at".into());
         save_auth_to(base, "google-docs", &auth).unwrap();
 
-        let out =
-            resolve_template_variables_with_base(base, "Bearer $POSTAGENT.GOOGLE-DOCS.ACCESS_TOKEN")
-                .unwrap();
+        let out = resolve_template_variables_with_base(
+            base,
+            "Bearer $POSTAGENT.GOOGLE-DOCS.ACCESS_TOKEN",
+        )
+        .unwrap();
         assert_eq!(out, "Bearer shared-at");
     }
 
@@ -820,10 +847,8 @@ mod tests {
 
     #[test]
     fn referenced_sites_dedupes() {
-        let sites = referenced_sites(&[
-            "$POSTAGENT.GITHUB.TOKEN",
-            "$POSTAGENT.GITHUB.ACCESS_TOKEN",
-        ]);
+        let sites =
+            referenced_sites(&["$POSTAGENT.GITHUB.TOKEN", "$POSTAGENT.GITHUB.ACCESS_TOKEN"]);
         assert_eq!(sites, vec!["github"]);
     }
 }
