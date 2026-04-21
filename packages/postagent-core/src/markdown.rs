@@ -177,7 +177,10 @@ fn utf8_char_len(first_byte: u8) -> usize {
 }
 
 fn find_next(bytes: &[u8], target: u8, start: usize) -> Option<usize> {
-    bytes[start..].iter().position(|&b| b == target).map(|p| start + p)
+    bytes[start..]
+        .iter()
+        .position(|&b| b == target)
+        .map(|p| start + p)
 }
 
 fn find_double_star(bytes: &[u8], start: usize) -> Option<usize> {

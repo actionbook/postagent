@@ -93,10 +93,7 @@ mod tests {
 
     #[test]
     fn align_columns_single_column() {
-        let rows = vec![
-            vec!["hello".into()],
-            vec!["world".into()],
-        ];
+        let rows = vec![vec!["hello".into()], vec!["world".into()]];
         let result = align_columns(&rows, 2);
         assert_eq!(result[0], "hello");
         assert_eq!(result[1], "world");

@@ -85,12 +85,18 @@ pub fn exchange(inputs: ExchangeInputs<'_>) -> Result<TokenResponse, String> {
         other => return Err(format!("unsupported body_encoding: {}", other)),
     };
 
-    let resp = req.send().map_err(|e| format!("token request failed: {}", e))?;
+    let resp = req
+        .send()
+        .map_err(|e| format!("token request failed: {}", e))?;
     let status = resp.status();
     let text = resp.text().unwrap_or_default();
 
     if !status.is_success() {
-        return Err(format!("token endpoint returned HTTP {}: {}", status.as_u16(), text));
+        return Err(format!(
+            "token endpoint returned HTTP {}: {}",
+            status.as_u16(),
+            text
+        ));
     }
 
     let value: Value = serde_json::from_str(&text)
@@ -269,9 +275,8 @@ mod tests {
 
                 let headers =
                     String::from_utf8_lossy(&all[..headers_end.saturating_sub(4)]).to_string();
-                let body =
-                    String::from_utf8_lossy(&all[headers_end..headers_end + content_length])
-                        .to_string();
+                let body = String::from_utf8_lossy(&all[headers_end..headers_end + content_length])
+                    .to_string();
                 tx.send(CapturedRequest { headers, body }).ok();
 
                 let resp = format!(

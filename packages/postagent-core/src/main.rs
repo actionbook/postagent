@@ -23,12 +23,8 @@ fn main() {
             action,
             json,
         } => {
-            let result = commands::manual::run(
-                site.as_deref(),
-                group.as_deref(),
-                action.as_deref(),
-                json,
-            );
+            let result =
+                commands::manual::run(site.as_deref(), group.as_deref(), action.as_deref(), json);
             if let Err(ref e) = result {
                 if e.to_string() == "show_help" {
                     Cli::command().print_help().ok();

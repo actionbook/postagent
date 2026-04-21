@@ -249,7 +249,10 @@ mod tests {
                 .split_once('.')
                 .map(|(_, tail)| {
                     let field = tail.split('.').next().unwrap_or("");
-                    matches!(field, "API_KEY" | "TOKEN" | "ACCESS_TOKEN" | "REFRESH_TOKEN" | "EXTRAS")
+                    matches!(
+                        field,
+                        "API_KEY" | "TOKEN" | "ACCESS_TOKEN" | "REFRESH_TOKEN" | "EXTRAS"
+                    )
                 })
                 .unwrap_or(false);
             let result = reject_if_template_shaped("get", key);

@@ -51,12 +51,15 @@ Examples:
         json: bool,
     },
     /// Get site/group/action details (progressive discovery)
-    #[command(alias = "man", after_help = "\
+    #[command(
+        alias = "man",
+        after_help = "\
 Examples:
   postagent manual notion                         List groups and actions
   postagent manual notion pages                   List actions in a group
   postagent manual notion pages create_page       Full action details
-  postagent manual notion --json                  JSON output")]
+  postagent manual notion --json                  JSON output"
+    )]
     Manual {
         /// Site name
         site: Option<String>,
@@ -233,7 +236,12 @@ mod tests {
         let cli = Cli::parse_from(["postagent", "manual"]);
         assert!(matches!(
             cli.command,
-            Commands::Manual { site: None, group: None, action: None, .. }
+            Commands::Manual {
+                site: None,
+                group: None,
+                action: None,
+                ..
+            }
         ));
     }
 
@@ -270,7 +278,12 @@ mod tests {
     fn parse_auth_command() {
         let cli = Cli::parse_from(["postagent", "auth", "openai"]);
         match cli.command {
-            Commands::Auth { site, token, action, .. } => {
+            Commands::Auth {
+                site,
+                token,
+                action,
+                ..
+            } => {
                 assert_eq!(site.as_deref(), Some("openai"));
                 assert!(token.is_none());
                 assert!(action.is_none());
@@ -364,14 +377,25 @@ mod tests {
     #[test]
     fn parse_send_with_method_and_headers() {
         let cli = Cli::parse_from([
-            "postagent", "send", "https://api.example.com",
-            "-X", "POST",
-            "-H", "Content-Type: application/json",
-            "-H", "Authorization: Bearer token",
-            "-d", r#"{"key":"value"}"#,
+            "postagent",
+            "send",
+            "https://api.example.com",
+            "-X",
+            "POST",
+            "-H",
+            "Content-Type: application/json",
+            "-H",
+            "Authorization: Bearer token",
+            "-d",
+            r#"{"key":"value"}"#,
         ]);
         match cli.command {
-            Commands::Send { url, method, header, data } => {
+            Commands::Send {
+                url,
+                method,
+                header,
+                data,
+            } => {
                 assert_eq!(url, "https://api.example.com");
                 assert_eq!(method, Some("POST".to_string()));
                 assert_eq!(header.len(), 2);

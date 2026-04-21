@@ -12,8 +12,8 @@ fn contains_token_template(s: &str) -> bool {
 }
 
 fn validated_send_url(raw_url: &str) -> Result<reqwest::Url, String> {
-    let url =
-        reqwest::Url::parse(raw_url).map_err(|_| "Invalid URL after template resolution.".to_string())?;
+    let url = reqwest::Url::parse(raw_url)
+        .map_err(|_| "Invalid URL after template resolution.".to_string())?;
 
     let is_loopback_http = url.scheme() == "http"
         && url.host_str().is_some_and(|host| {
@@ -125,7 +125,10 @@ pub fn run(
         "PATCH" => client.patch(parsed_url.clone()),
         "DELETE" => client.delete(parsed_url.clone()),
         "HEAD" => client.head(parsed_url.clone()),
-        _ => client.request(reqwest::Method::from_bytes(http_method.as_bytes())?, parsed_url.clone()),
+        _ => client.request(
+            reqwest::Method::from_bytes(http_method.as_bytes())?,
+            parsed_url.clone(),
+        ),
     };
 
     for (key, value) in &merged_headers {

@@ -308,11 +308,13 @@ mod tests {
         let a: AuthMethod = serde_json::from_value(json!({
             "kind": "static", "id": "a", "label": "A",
             "scheme": "bearer", "in": "header", "name": "Authorization"
-        })).unwrap();
+        }))
+        .unwrap();
         let b: AuthMethod = serde_json::from_value(json!({
             "kind": "static", "id": "b", "label": "B",
             "scheme": "bearer", "in": "header", "name": "Authorization"
-        })).unwrap();
+        }))
+        .unwrap();
         assert_ne!(descriptor_hash(&a), descriptor_hash(&b));
     }
 }

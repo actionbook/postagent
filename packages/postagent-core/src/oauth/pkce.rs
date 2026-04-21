@@ -20,7 +20,10 @@ pub fn generate() -> PkceCodes {
     let digest = Sha256::digest(verifier.as_bytes());
     let challenge = URL_SAFE_NO_PAD.encode(digest);
 
-    PkceCodes { verifier, challenge }
+    PkceCodes {
+        verifier,
+        challenge,
+    }
 }
 
 #[cfg(test)]
