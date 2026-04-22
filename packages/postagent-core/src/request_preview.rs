@@ -284,7 +284,7 @@ pub fn redact_url(url: &reqwest::Url) -> String {
     }
     if let Some(frag) = url.fragment() {
         out.push('#');
-        out.push_str(frag);
+        out.push_str(&redact_body(frag));
     }
     out
 }
@@ -562,6 +562,25 @@ mod tests {
         assert!(out.starts_with("https://api.example.com:8443/v1?"));
         assert!(out.contains("api_key=***"));
         assert!(out.ends_with("#anchor"));
+    }
+
+    #[test]
+    fn redact_url_masks_sensitive_fragment_fields() {
+        let u = reqwest::Url::parse(
+            "https://api.example.com/callback#access_token=secret123abc&state=ok",
+        )
+        .unwrap();
+        let out = redact_url(&u);
+        assert!(
+            out.ends_with("#access_token=***&state=ok"),
+            "fragment not redacted: {}",
+            out
+        );
+        assert!(
+            !out.contains("secret123abc"),
+            "fragment secret leaked: {}",
+            out
+        );
     }
 
     #[test]
