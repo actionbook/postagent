@@ -207,10 +207,15 @@ fn redact_form_body(body: &str) -> Option<String> {
             continue;
         }
 
-        let (name, value) = segment.split_once('=')?;
-        saw_pair = true;
-        if is_sensitive_form_field_name(name) || looks_like_secret_body_value(value) {
-            parts.push(format!("{}=***", name));
+        if let Some((name, value)) = segment.split_once('=') {
+            saw_pair = true;
+            if is_sensitive_form_field_name(name) || looks_like_secret_body_value(value) {
+                parts.push(format!("{}=***", name));
+            } else {
+                parts.push(segment.to_string());
+            }
+        } else if looks_like_secret_body_value(segment) {
+            parts.push("***".to_string());
         } else {
             parts.push(segment.to_string());
         }
@@ -410,6 +415,15 @@ mod tests {
         assert_eq!(
             redact_body(body),
             "user=alice&client_secret=***&access_token=***"
+        );
+    }
+
+    #[test]
+    fn redact_body_masks_form_encoded_sensitive_fields_with_malformed_segments() {
+        let body = "client_secret=supersecret&scope&access_token=abc123xyz456";
+        assert_eq!(
+            redact_body(body),
+            "client_secret=***&scope&access_token=***"
         );
     }
 
