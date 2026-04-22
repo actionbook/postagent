@@ -31,6 +31,9 @@ pub fn is_sensitive_header(name: &str) -> bool {
     }
     lower.contains("secret")
         || lower.contains("password")
+        || lower.contains("apikey")
+        || lower.contains("api_key")
+        || lower.contains("api-key")
         || lower.ends_with("-token")
         || lower.ends_with("_token")
         || lower.ends_with("-key")
@@ -424,6 +427,9 @@ mod tests {
             "X-API-Key",
             "api-key",
             "apikey",
+            "X-ApiKey",
+            "x-apikey",
+            "x_api_key",
         ] {
             assert!(is_sensitive_header(name), "expected sensitive: {}", name);
         }
