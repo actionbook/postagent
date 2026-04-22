@@ -154,11 +154,77 @@ fn looks_like_secret_segment(seg: &str) -> bool {
         match b {
             b'A'..=b'Z' | b'a'..=b'z' => has_letter = true,
             b'0'..=b'9' => has_digit = true,
-            b'_' | b'-' | b'.' | b'~' => {}
+            b'_' | b'-' | b'.' | b'~' | b'+' | b'=' => {}
             _ => return false,
         }
     }
     has_letter && has_digit
+}
+
+fn decode_form_component(input: &str) -> String {
+    let mut out = Vec::with_capacity(input.len());
+    let bytes = input.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b'%' if i + 2 < bytes.len() => {
+                let hi = bytes[i + 1];
+                let lo = bytes[i + 2];
+                if let (Some(hi), Some(lo)) = (hex_value(hi), hex_value(lo)) {
+                    out.push(hi * 16 + lo);
+                    i += 3;
+                } else {
+                    out.push(b'%');
+                    i += 1;
+                }
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn encode_form_component(input: &str) -> String {
+    let mut out = String::new();
+    for b in input.bytes() {
+        if is_unreserved_byte(b) {
+            out.push(b as char);
+        } else {
+            out.push('%');
+            out.push_str(&format!("{:02X}", b));
+        }
+    }
+    out
+}
+
+fn hex_value(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn is_unreserved_byte(b: u8) -> bool {
+    matches!(
+        b,
+        b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~'
+    )
+}
+
+fn redact_query_value(value: &str) -> String {
+    if let Ok(url) = reqwest::Url::parse(value) {
+        return redact_url(&url);
+    }
+    redact_body(value)
 }
 
 fn redact_json_value(value: &mut serde_json::Value, parent_key: Option<&str>) -> bool {
@@ -268,15 +334,35 @@ pub fn redact_url(url: &reqwest::Url) -> String {
         out.push_str(&port.to_string());
     }
     out.push_str(&redact_path(url.path()));
-    if url.query().is_some() {
+    if let Some(query) = url.query() {
         out.push('?');
-        let pairs: Vec<String> = url
-            .query_pairs()
-            .map(|(k, v)| {
-                if is_sensitive_query_name(&k) {
-                    format!("{}=***", k)
+        let pairs: Vec<String> = query
+            .split('&')
+            .map(|pair| {
+                if pair.is_empty() {
+                    return String::new();
+                }
+
+                if let Some((key, value)) = pair.split_once('=') {
+                    let decoded_key = decode_form_component(key);
+                    if is_sensitive_query_name(&decoded_key) {
+                        format!("{}=***", encode_form_component(&decoded_key))
+                    } else {
+                        let decoded_value = decode_form_component(value);
+                        let redacted_value = redact_query_value(&decoded_value);
+                        format!(
+                            "{}={}",
+                            encode_form_component(&decoded_key),
+                            encode_form_component(&redacted_value)
+                        )
+                    }
                 } else {
-                    format!("{}={}", k, v)
+                    let decoded_key = decode_form_component(pair);
+                    if is_sensitive_query_name(&decoded_key) {
+                        format!("{}=***", encode_form_component(&decoded_key))
+                    } else {
+                        encode_form_component(&decoded_key)
+                    }
                 }
             })
             .collect();
@@ -492,6 +578,37 @@ mod tests {
     }
 
     #[test]
+    fn redact_url_masks_nested_sensitive_query_values() {
+        let u = reqwest::Url::parse(
+            "https://api.example.com/callback?state=ok%26access_token%3Dsecret123abc&mode=1",
+        )
+        .unwrap();
+        let out = redact_url(&u);
+        assert!(
+            out.contains("state=ok%26access_token%3D%2A%2A%2A"),
+            "nested sensitive query not redacted: {}",
+            out
+        );
+        assert!(
+            !out.contains("secret123abc"),
+            "nested secret leaked: {}",
+            out
+        );
+        assert!(out.contains("mode=1"), "benign param lost: {}", out);
+    }
+
+    #[test]
+    fn redact_url_preserves_utf8_query_values_when_reencoding() {
+        let u = reqwest::Url::parse("https://api.example.com/search?q=caf%C3%A9").unwrap();
+        let out = redact_url(&u);
+        assert!(
+            out.contains("q=caf%C3%A9"),
+            "utf-8 query was mangled: {}",
+            out
+        );
+    }
+
+    #[test]
     fn redact_url_masks_additional_sensitive_names() {
         // The rule favors false-positive redaction over leaking: any *_key /
         // *-key query name is masked, even benign ones like sort_key. The
@@ -614,6 +731,10 @@ mod tests {
         assert_eq!(
             redact_path("/orgs/550e8400-e29b-41d4-a716-446655440000/keys"),
             "/orgs/***/keys"
+        );
+        assert_eq!(
+            redact_path("/files/AbCdEf0123456789AbCdEf0123456789+=/raw"),
+            "/files/***/raw"
         );
     }
 
