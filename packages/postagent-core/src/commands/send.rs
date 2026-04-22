@@ -115,12 +115,10 @@ fn execute(
     prepared: &PreparedRequest,
     pre: &PreSubstitutionInputs,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // prepare() already gates the URL scheme, but re-check here so the
-    // transport guard lives next to the network sink it protects.
-    if !is_allowed_transport(&prepared.url) {
-        return Err("Refusing to send $POSTAGENT credentials to a non-HTTPS URL.".into());
-    }
-    let safe_url = prepared.url.clone();
+    // Re-run validated_send_url in this function so the sanitizer is
+    // visible to static-analysis taint tracking in the same scope as the
+    // reqwest sinks below. prepare() already validated once.
+    let safe_url = validated_send_url(prepared.url.as_str())?;
 
     let client = Client::builder().timeout(Duration::from_secs(30)).build()?;
 
