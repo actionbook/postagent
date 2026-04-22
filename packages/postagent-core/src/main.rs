@@ -7,6 +7,7 @@ mod error;
 mod formatter;
 mod markdown;
 mod oauth;
+mod request_preview;
 mod token;
 
 use clap::{CommandFactory, Parser};
@@ -82,7 +83,8 @@ fn main() {
             method,
             header,
             data,
-        } => commands::send::run(&url, method.as_deref(), &header, data.as_deref()),
+            dry_run,
+        } => commands::send::run(&url, method.as_deref(), &header, data.as_deref(), dry_run),
     };
 
     if let Err(e) = result {

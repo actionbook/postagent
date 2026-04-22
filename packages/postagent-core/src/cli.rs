@@ -168,7 +168,8 @@ Token substitution:
 Examples:
   postagent send https://api.example.com/users
   postagent send https://api.example.com/users -X POST -d '{\"name\":\"alice\"}'
-  postagent send https://api.github.com/user -H 'Authorization: Bearer $POSTAGENT.GITHUB.TOKEN'")]
+  postagent send https://api.github.com/user -H 'Authorization: Bearer $POSTAGENT.GITHUB.TOKEN'
+  postagent send https://api.github.com/user -H 'Authorization: Bearer $POSTAGENT.GITHUB.TOKEN' --dry-run")]
     Send {
         /// Request URL
         url: String,
@@ -181,6 +182,9 @@ Examples:
         /// Request body
         #[arg(short = 'd', long)]
         data: Option<String>,
+        /// Preview the final request (method, URL, headers, body) without sending
+        #[arg(long = "dry-run")]
+        dry_run: bool,
     },
 }
 
@@ -369,7 +373,7 @@ mod tests {
         let cli = Cli::parse_from(["postagent", "send", "https://example.com"]);
         assert!(matches!(
             cli.command,
-            Commands::Send { ref url, method: None, ref header, data: None }
+            Commands::Send { ref url, method: None, ref header, data: None, dry_run: false }
                 if url == "https://example.com" && header.is_empty()
         ));
     }
@@ -395,6 +399,7 @@ mod tests {
                 method,
                 header,
                 data,
+                dry_run,
             } => {
                 assert_eq!(url, "https://api.example.com");
                 assert_eq!(method, Some("POST".to_string()));
@@ -402,7 +407,17 @@ mod tests {
                 assert_eq!(header[0], "Content-Type: application/json");
                 assert_eq!(header[1], "Authorization: Bearer token");
                 assert_eq!(data, Some(r#"{"key":"value"}"#.to_string()));
+                assert!(!dry_run);
             }
+            _ => panic!("expected Send command"),
+        }
+    }
+
+    #[test]
+    fn parse_send_with_dry_run_flag() {
+        let cli = Cli::parse_from(["postagent", "send", "https://api.example.com", "--dry-run"]);
+        match cli.command {
+            Commands::Send { dry_run, .. } => assert!(dry_run),
             _ => panic!("expected Send command"),
         }
     }

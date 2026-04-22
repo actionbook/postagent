@@ -30,6 +30,14 @@ The `send` command uses the same options as `curl`, so agents already know how t
 
 Postagent replaces the `API_KEY` placeholder with the actual key/token from local storage, keeping your credentials out of the LLM context entirely.
 
+Add `--dry-run` to preview the resolved request (method, URL, headers, body) without making any outbound call. Sensitive headers are redacted in the preview:
+
+```bash
+postagent send https://api.github.com/user \
+  -H 'Authorization: Bearer $POSTAGENT.GITHUB.TOKEN' \
+  --dry-run
+```
+
 ## Usage with Agents
 
 The easiest way is to just tell your agent to use it:

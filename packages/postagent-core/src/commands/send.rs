@@ -1,6 +1,6 @@
+use crate::request_preview::{render_dry_run, HeaderEntry, PreparedRequest};
 use crate::token::{referenced_sites, resolve_template_variables};
 use reqwest::blocking::Client;
-use std::collections::HashMap;
 use std::net::IpAddr;
 use std::time::Duration;
 
@@ -35,65 +35,34 @@ fn validated_send_url(raw_url: &str) -> Result<reqwest::Url, String> {
     }
 }
 
-pub fn run(
+struct PreSubstitutionInputs {
+    url: String,
+    headers: Vec<String>,
+    body: String,
+}
+
+fn prepare(
     raw_url: &str,
     method: Option<&str>,
     headers: &[String],
     data: Option<&str>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let has_token = contains_token_template(raw_url)
-        || headers.iter().any(|h| contains_token_template(h))
-        || data.is_some_and(contains_token_template);
-    if !has_token {
-        eprintln!("Missing $POSTAGENT.<SITE>.TOKEN (or .ACCESS_TOKEN / .API_KEY) in URL, headers, or body.");
-        eprintln!("Pass the template as a literal string — do not try to fetch the token value separately.\n");
-        eprintln!("Example: -H 'Authorization: Bearer $POSTAGENT.GITHUB.TOKEN'");
-        std::process::exit(1);
-    }
+) -> Result<PreparedRequest, String> {
+    let url_resolved = resolve_template_variables(raw_url)?;
+    let parsed_url = validated_send_url(&url_resolved)?;
 
-    // Capture the pre-resolution inputs so we can still report which sites
-    // were referenced after substitution replaces the templates with tokens.
-    let headers_joined: Vec<String> = headers.to_vec();
-    let body_snap = data.unwrap_or("").to_string();
-    let url_snap = raw_url.to_string();
-
-    let url = match resolve_template_variables(raw_url) {
-        Ok(u) => u,
-        Err(e) => {
-            eprintln!("{}", e);
-            std::process::exit(1);
-        }
-    };
-    let parsed_url = match validated_send_url(&url) {
-        Ok(url) => url,
-        Err(e) => {
-            eprintln!("{}", e);
-            std::process::exit(1);
-        }
-    };
-
-    let mut merged_headers: HashMap<String, String> = HashMap::new();
+    let mut merged: Vec<HeaderEntry> = Vec::new();
     for raw in headers {
-        let resolved = match resolve_template_variables(raw) {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("{}", e);
-                std::process::exit(1);
-            }
-        };
-        for (k, v) in parse_header(&resolved) {
-            merged_headers.insert(k, v);
+        let resolved = resolve_template_variables(raw)?;
+        let mut parsed = parse_header(&resolved);
+        // Sort JSON-mode multi-header payloads for deterministic ordering.
+        parsed.sort_by(|a, b| a.0.to_ascii_lowercase().cmp(&b.0.to_ascii_lowercase()));
+        for (k, v) in parsed {
+            upsert_header(&mut merged, k, v, false);
         }
     }
 
     let body = match data {
-        Some(d) => match resolve_template_variables(d) {
-            Ok(r) => Some(r),
-            Err(e) => {
-                eprintln!("{}", e);
-                std::process::exit(1);
-            }
-        },
+        Some(d) => Some(resolve_template_variables(d)?),
         None => None,
     };
 
@@ -105,37 +74,62 @@ pub fn run(
         "GET".to_string()
     };
 
-    let ua_key = "User-Agent";
-    if !merged_headers
-        .keys()
-        .any(|k| k.eq_ignore_ascii_case(ua_key))
+    if !merged
+        .iter()
+        .any(|h| h.name.eq_ignore_ascii_case("User-Agent"))
     {
-        merged_headers.insert(
-            ua_key.to_string(),
-            format!("postagent/{}", env!("CARGO_PKG_VERSION")),
-        );
+        merged.push(HeaderEntry {
+            name: "User-Agent".to_string(),
+            value: format!("postagent/{}", env!("CARGO_PKG_VERSION")),
+            auto_injected: true,
+        });
     }
 
+    Ok(PreparedRequest {
+        method: http_method,
+        url: parsed_url,
+        headers: merged,
+        body,
+    })
+}
+
+fn upsert_header(list: &mut Vec<HeaderEntry>, name: String, value: String, auto_injected: bool) {
+    if let Some(existing) = list.iter_mut().find(|h| h.name.eq_ignore_ascii_case(&name)) {
+        existing.value = value;
+        existing.auto_injected = auto_injected;
+        return;
+    }
+    list.push(HeaderEntry {
+        name,
+        value,
+        auto_injected,
+    });
+}
+
+fn execute(
+    prepared: &PreparedRequest,
+    pre: &PreSubstitutionInputs,
+) -> Result<(), Box<dyn std::error::Error>> {
     let client = Client::builder().timeout(Duration::from_secs(30)).build()?;
 
-    let mut request = match http_method.as_str() {
-        "GET" => client.get(parsed_url.clone()),
-        "POST" => client.post(parsed_url.clone()),
-        "PUT" => client.put(parsed_url.clone()),
-        "PATCH" => client.patch(parsed_url.clone()),
-        "DELETE" => client.delete(parsed_url.clone()),
-        "HEAD" => client.head(parsed_url.clone()),
-        _ => client.request(
-            reqwest::Method::from_bytes(http_method.as_bytes())?,
-            parsed_url.clone(),
+    let mut request = match prepared.method.as_str() {
+        "GET" => client.get(prepared.url.clone()),
+        "POST" => client.post(prepared.url.clone()),
+        "PUT" => client.put(prepared.url.clone()),
+        "PATCH" => client.patch(prepared.url.clone()),
+        "DELETE" => client.delete(prepared.url.clone()),
+        "HEAD" => client.head(prepared.url.clone()),
+        other => client.request(
+            reqwest::Method::from_bytes(other.as_bytes())?,
+            prepared.url.clone(),
         ),
     };
 
-    for (key, value) in &merged_headers {
-        request = request.header(key.as_str(), value.as_str());
+    for h in &prepared.headers {
+        request = request.header(h.name.as_str(), h.value.as_str());
     }
 
-    if let Some(b) = &body {
+    if let Some(b) = &prepared.body {
         request = request.body(b.clone());
     }
 
@@ -163,8 +157,8 @@ pub fn run(
 
         if status.as_u16() == 401 || status.as_u16() == 403 {
             eprintln!();
-            let header_refs: Vec<&str> = headers_joined.iter().map(|s| s.as_str()).collect();
-            let mut inputs: Vec<&str> = vec![url_snap.as_str(), body_snap.as_str()];
+            let header_refs: Vec<&str> = pre.headers.iter().map(|s| s.as_str()).collect();
+            let mut inputs: Vec<&str> = vec![pre.url.as_str(), pre.body.as_str()];
             inputs.extend(header_refs);
             let sites = referenced_sites(&inputs);
             if sites.is_empty() {
@@ -187,47 +181,78 @@ pub fn run(
     Ok(())
 }
 
-fn parse_header(raw: &str) -> HashMap<String, String> {
+pub fn run(
+    raw_url: &str,
+    method: Option<&str>,
+    headers: &[String],
+    data: Option<&str>,
+    dry_run: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let has_token = contains_token_template(raw_url)
+        || headers.iter().any(|h| contains_token_template(h))
+        || data.is_some_and(contains_token_template);
+    if !has_token {
+        eprintln!("Missing $POSTAGENT.<SITE>.TOKEN (or .ACCESS_TOKEN / .API_KEY) in URL, headers, or body.");
+        eprintln!("Pass the template as a literal string — do not try to fetch the token value separately.\n");
+        eprintln!("Example: -H 'Authorization: Bearer $POSTAGENT.GITHUB.TOKEN'");
+        std::process::exit(1);
+    }
+
+    let prepared = match prepare(raw_url, method, headers, data) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("{}", e);
+            std::process::exit(1);
+        }
+    };
+
+    if dry_run {
+        print!("{}", render_dry_run(&prepared));
+        return Ok(());
+    }
+
+    let pre = PreSubstitutionInputs {
+        url: raw_url.to_string(),
+        headers: headers.to_vec(),
+        body: data.unwrap_or("").to_string(),
+    };
+    execute(&prepared, &pre)
+}
+
+fn parse_header(raw: &str) -> Vec<(String, String)> {
     let trimmed = raw.trim();
     if trimmed.starts_with('{') {
-        if let Ok(map) = serde_json::from_str::<HashMap<String, String>>(trimmed) {
-            return map;
+        if let Ok(map) = serde_json::from_str::<std::collections::HashMap<String, String>>(trimmed)
+        {
+            return map.into_iter().collect();
         }
     }
-    let mut result = HashMap::new();
     if let Some(colon_idx) = trimmed.find(':') {
         let key = trimmed[..colon_idx].trim().to_string();
         let value = trimmed[colon_idx + 1..].trim().to_string();
-        result.insert(key, value);
+        return vec![(key, value)];
     }
-    result
+    Vec::new()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn find_header<'a>(prepared: &'a PreparedRequest, name: &str) -> Option<&'a HeaderEntry> {
+        prepared
+            .headers
+            .iter()
+            .find(|h| h.name.eq_ignore_ascii_case(name))
+    }
+
     #[test]
     fn parse_header_json_format() {
         let input = r#"{"content-type": "application/json"}"#;
         let result = parse_header(input);
         assert_eq!(result.len(), 1);
-        assert_eq!(
-            result.get("content-type"),
-            Some(&"application/json".to_string())
-        );
-    }
-
-    #[test]
-    fn parse_header_json_multiple_keys() {
-        let input = r#"{"Authorization": "Bearer token", "Accept": "text/html"}"#;
-        let result = parse_header(input);
-        assert_eq!(result.len(), 2);
-        assert_eq!(
-            result.get("Authorization"),
-            Some(&"Bearer token".to_string())
-        );
-        assert_eq!(result.get("Accept"), Some(&"text/html".to_string()));
+        assert_eq!(result[0].0, "content-type");
+        assert_eq!(result[0].1, "application/json");
     }
 
     #[test]
@@ -235,10 +260,8 @@ mod tests {
         let input = "Content-Type: application/json";
         let result = parse_header(input);
         assert_eq!(result.len(), 1);
-        assert_eq!(
-            result.get("Content-Type"),
-            Some(&"application/json".to_string())
-        );
+        assert_eq!(result[0].0, "Content-Type");
+        assert_eq!(result[0].1, "application/json");
     }
 
     #[test]
@@ -246,10 +269,8 @@ mod tests {
         let input = "  Authorization :  Bearer my-token  ";
         let result = parse_header(input);
         assert_eq!(result.len(), 1);
-        assert_eq!(
-            result.get("Authorization"),
-            Some(&"Bearer my-token".to_string())
-        );
+        assert_eq!(result[0].0, "Authorization");
+        assert_eq!(result[0].1, "Bearer my-token");
     }
 
     #[test]
@@ -257,93 +278,100 @@ mod tests {
         let input = "Authorization: Bearer abc:def";
         let result = parse_header(input);
         assert_eq!(result.len(), 1);
-        assert_eq!(
-            result.get("Authorization"),
-            Some(&"Bearer abc:def".to_string())
-        );
+        assert_eq!(result[0].1, "Bearer abc:def");
     }
 
     #[test]
     fn parse_header_invalid_input_returns_empty() {
-        let result = parse_header("no-colon-here");
-        assert!(result.is_empty());
+        assert!(parse_header("no-colon-here").is_empty());
     }
 
     #[test]
     fn parse_header_empty_string_returns_empty() {
-        let result = parse_header("");
-        assert!(result.is_empty());
+        assert!(parse_header("").is_empty());
     }
 
     #[test]
-    fn parse_header_invalid_json_falls_back_to_key_value() {
-        let input = "{broken json";
-        let result = parse_header(input);
-        assert!(result.is_empty());
+    fn parse_header_invalid_json_falls_back_to_empty() {
+        assert!(parse_header("{broken json").is_empty());
     }
 
     #[test]
-    fn parse_header_invalid_json_with_colon_fallback() {
-        let input = "{broken: json}";
-        let result = parse_header(input);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result.get("{broken"), Some(&"json}".to_string()));
+    fn prepare_infers_get_without_method_and_body() {
+        let prepared = prepare("https://example.com/", None, &[], None).expect("prepare");
+        assert_eq!(prepared.method, "GET");
+        assert!(prepared.body.is_none());
     }
 
     #[test]
-    fn method_inference_defaults_to_get_without_body() {
-        let method: Option<&str> = None;
-        let body: Option<&str> = None;
-        let http_method = if let Some(m) = method {
-            m.to_uppercase()
-        } else if body.is_some() {
-            "POST".to_string()
-        } else {
-            "GET".to_string()
-        };
-        assert_eq!(http_method, "GET");
+    fn prepare_infers_post_with_body() {
+        let prepared =
+            prepare("https://example.com/", None, &[], Some(r#"{"a":1}"#)).expect("prepare");
+        assert_eq!(prepared.method, "POST");
+        assert_eq!(prepared.body.as_deref(), Some(r#"{"a":1}"#));
     }
 
     #[test]
-    fn method_inference_defaults_to_post_with_body() {
-        let method: Option<&str> = None;
-        let body: Option<&str> = Some(r#"{"key":"value"}"#);
-        let http_method = if let Some(m) = method {
-            m.to_uppercase()
-        } else if body.is_some() {
-            "POST".to_string()
-        } else {
-            "GET".to_string()
-        };
-        assert_eq!(http_method, "POST");
+    fn prepare_honors_explicit_method() {
+        let prepared = prepare("https://example.com/", Some("delete"), &[], None).expect("prepare");
+        assert_eq!(prepared.method, "DELETE");
     }
 
     #[test]
-    fn method_inference_explicit_method_overrides() {
-        let method: Option<&str> = Some("put");
-        let body: Option<&str> = Some(r#"{"key":"value"}"#);
-        let http_method = if let Some(m) = method {
-            m.to_uppercase()
-        } else if body.is_some() {
-            "POST".to_string()
-        } else {
-            "GET".to_string()
-        };
-        assert_eq!(http_method, "PUT");
+    fn prepare_auto_injects_user_agent() {
+        let prepared = prepare("https://example.com/", None, &[], None).expect("prepare");
+        let ua = find_header(&prepared, "User-Agent").expect("UA present");
+        assert!(ua.auto_injected);
+        assert!(ua.value.starts_with("postagent/"));
     }
 
     #[test]
-    fn method_inference_explicit_delete_without_body() {
-        let method: Option<&str> = Some("DELETE");
-        let body: Option<&str> = None;
-        let http_method = if let Some(m) = method {
-            m.to_uppercase()
-        } else if body.is_some() {
-            "POST".to_string()
-        } else {
-            "GET".to_string()
-        };
-        assert_eq!(http_method, "DELETE");
+    fn prepare_respects_user_provided_user_agent() {
+        let headers = vec!["User-Agent: my-tool/1.0".to_string()];
+        let prepared = prepare("https://example.com/", None, &headers, None).expect("prepare");
+        let ua = find_header(&prepared, "User-Agent").expect("UA present");
+        assert!(!ua.auto_injected);
+        assert_eq!(ua.value, "my-tool/1.0");
+    }
+
+    #[test]
+    fn prepare_dedupes_duplicate_header_names_case_insensitively() {
+        let headers = vec![
+            "Content-Type: text/plain".to_string(),
+            "content-type: application/json".to_string(),
+        ];
+        let prepared = prepare("https://example.com/", None, &headers, None).expect("prepare");
+        let count = prepared
+            .headers
+            .iter()
+            .filter(|h| h.name.eq_ignore_ascii_case("content-type"))
+            .count();
+        assert_eq!(count, 1);
+        let ct = find_header(&prepared, "Content-Type").expect("CT present");
+        assert_eq!(ct.value, "application/json");
+    }
+
+    #[test]
+    fn prepare_rejects_non_https_remote_url() {
+        let err = prepare("http://api.example.com/v1", None, &[], None).unwrap_err();
+        assert!(err.contains("non-HTTPS URL"));
+    }
+
+    #[test]
+    fn prepare_allows_loopback_http() {
+        for raw_url in [
+            "http://localhost:3000/v1",
+            "http://127.0.0.1:3000/v1",
+            "http://[::1]:3000/v1",
+        ] {
+            prepare(raw_url, None, &[], None).expect("loopback should be allowed");
+        }
+    }
+
+    #[test]
+    fn prepare_rejects_invalid_url() {
+        let err = prepare("not a url", None, &[], None).unwrap_err();
+        assert_eq!(err, "Invalid URL after template resolution.");
     }
 
     #[test]
