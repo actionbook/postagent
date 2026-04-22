@@ -11,21 +11,26 @@ fn contains_token_template(s: &str) -> bool {
         .is_match(s)
 }
 
+fn is_loopback_host(url: &reqwest::Url) -> bool {
+    url.host_str().is_some_and(|host| {
+        let normalized = host.trim_start_matches('[').trim_end_matches(']');
+        normalized.eq_ignore_ascii_case("localhost")
+            || normalized
+                .parse::<IpAddr>()
+                .map(|ip| ip.is_loopback())
+                .unwrap_or(false)
+    })
+}
+
+fn is_allowed_transport(url: &reqwest::Url) -> bool {
+    url.scheme() == "https" || (url.scheme() == "http" && is_loopback_host(url))
+}
+
 fn validated_send_url(raw_url: &str) -> Result<reqwest::Url, String> {
     let url = reqwest::Url::parse(raw_url)
         .map_err(|_| "Invalid URL after template resolution.".to_string())?;
 
-    let is_loopback_http = url.scheme() == "http"
-        && url.host_str().is_some_and(|host| {
-            let normalized_host = host.trim_start_matches('[').trim_end_matches(']');
-            normalized_host.eq_ignore_ascii_case("localhost")
-                || normalized_host
-                    .parse::<IpAddr>()
-                    .map(|ip| ip.is_loopback())
-                    .unwrap_or(false)
-        });
-
-    if url.scheme() == "https" || is_loopback_http {
+    if is_allowed_transport(&url) {
         Ok(url)
     } else {
         Err(
@@ -110,18 +115,25 @@ fn execute(
     prepared: &PreparedRequest,
     pre: &PreSubstitutionInputs,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // prepare() already gates the URL scheme, but re-check here so the
+    // transport guard lives next to the network sink it protects.
+    if !is_allowed_transport(&prepared.url) {
+        return Err("Refusing to send $POSTAGENT credentials to a non-HTTPS URL.".into());
+    }
+    let safe_url = prepared.url.clone();
+
     let client = Client::builder().timeout(Duration::from_secs(30)).build()?;
 
     let mut request = match prepared.method.as_str() {
-        "GET" => client.get(prepared.url.clone()),
-        "POST" => client.post(prepared.url.clone()),
-        "PUT" => client.put(prepared.url.clone()),
-        "PATCH" => client.patch(prepared.url.clone()),
-        "DELETE" => client.delete(prepared.url.clone()),
-        "HEAD" => client.head(prepared.url.clone()),
+        "GET" => client.get(safe_url.clone()),
+        "POST" => client.post(safe_url.clone()),
+        "PUT" => client.put(safe_url.clone()),
+        "PATCH" => client.patch(safe_url.clone()),
+        "DELETE" => client.delete(safe_url.clone()),
+        "HEAD" => client.head(safe_url.clone()),
         other => client.request(
             reqwest::Method::from_bytes(other.as_bytes())?,
-            prepared.url.clone(),
+            safe_url.clone(),
         ),
     };
 
