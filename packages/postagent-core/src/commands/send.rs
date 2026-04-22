@@ -79,6 +79,13 @@ fn prepare(
         "GET".to_string()
     };
 
+    if reqwest::Method::from_bytes(http_method.as_bytes()).is_err() {
+        return Err(format!(
+            "Invalid HTTP method: {:?}. Method must be a valid HTTP token.",
+            http_method
+        ));
+    }
+
     if !merged
         .iter()
         .any(|h| h.name.eq_ignore_ascii_case("User-Agent"))
@@ -422,5 +429,30 @@ mod tests {
     fn validated_send_url_rejects_invalid_urls() {
         let err = validated_send_url("not a url").unwrap_err();
         assert_eq!(err, "Invalid URL after template resolution.");
+    }
+
+    #[test]
+    fn prepare_rejects_invalid_http_method() {
+        // Dry-run must reject bogus methods at prepare time so users don't
+        // see a "successful" preview for a request that cannot actually be
+        // sent. reqwest::Method::from_bytes enforces the RFC 7230 token
+        // grammar (no spaces, no control chars, etc.).
+        for bad in ["BAD METHOD", "", "GE T", "not\tok"] {
+            let err = prepare("https://example.com/", Some(bad), &[], None).unwrap_err();
+            assert!(
+                err.contains("Invalid HTTP method"),
+                "expected invalid-method error for {:?}, got: {}",
+                bad,
+                err
+            );
+        }
+    }
+
+    #[test]
+    fn prepare_accepts_standard_methods() {
+        for m in ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] {
+            prepare("https://example.com/", Some(m), &[], None)
+                .unwrap_or_else(|e| panic!("method {} should be valid: {}", m, e));
+        }
     }
 }

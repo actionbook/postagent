@@ -117,6 +117,41 @@ fn is_sensitive_query_name(name: &str) -> bool {
         || lower.ends_with("-key")
 }
 
+fn looks_like_secret_segment(seg: &str) -> bool {
+    // Path segments that resolved from $POSTAGENT.<SITE>.<FIELD> templates
+    // are opaque high-entropy strings (PATs, JWTs, signed keys). Catch them
+    // by shape: long, URL-safe, with mixed letter+digit content. Readable
+    // path components like "repos", "v1", "actionbook", "19" stay intact.
+    if seg.len() < 20 {
+        return false;
+    }
+    let mut has_letter = false;
+    let mut has_digit = false;
+    for b in seg.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' => has_letter = true,
+            b'0'..=b'9' => has_digit = true,
+            b'_' | b'-' | b'.' | b'~' => {}
+            _ => return false,
+        }
+    }
+    has_letter && has_digit
+}
+
+pub fn redact_path(path: &str) -> String {
+    // Preserve leading/trailing slashes and empty segments (e.g. "//").
+    path.split('/')
+        .map(|seg| {
+            if looks_like_secret_segment(seg) {
+                "***"
+            } else {
+                seg
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 pub fn redact_url(url: &reqwest::Url) -> String {
     // Build a preview form; prioritize readability over exact URL roundtrip.
     let mut out = String::new();
@@ -142,7 +177,7 @@ pub fn redact_url(url: &reqwest::Url) -> String {
         out.push(':');
         out.push_str(&port.to_string());
     }
-    out.push_str(url.path());
+    out.push_str(&redact_path(url.path()));
     if url.query().is_some() {
         out.push('?');
         let pairs: Vec<String> = url
@@ -396,6 +431,75 @@ mod tests {
         assert!(out.starts_with("https://api.example.com:8443/v1?"));
         assert!(out.contains("api_key=***"));
         assert!(out.ends_with("#anchor"));
+    }
+
+    #[test]
+    fn redact_path_keeps_readable_segments() {
+        assert_eq!(
+            redact_path("/repos/actionbook/postagent/pulls/19"),
+            "/repos/actionbook/postagent/pulls/19"
+        );
+        assert_eq!(redact_path("/v1/users/42"), "/v1/users/42");
+        assert_eq!(redact_path("/"), "/");
+        assert_eq!(redact_path(""), "");
+    }
+
+    #[test]
+    fn redact_path_masks_token_like_segments() {
+        // GitHub classic PAT shape
+        assert_eq!(
+            redact_path("/api/ghp_AbCdEf0123456789xyz0123456789AAAA/items"),
+            "/api/***/items"
+        );
+        // JWT-ish high-entropy base64
+        let jwt_path =
+            "/verify/eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhZG1pbiIsImlhdCI6MTYwOTQ1OTIwMH0.abc";
+        let out = redact_path(jwt_path);
+        assert!(
+            out.starts_with("/verify/***"),
+            "jwt segment not redacted: {}",
+            out
+        );
+        // UUID
+        assert_eq!(
+            redact_path("/orgs/550e8400-e29b-41d4-a716-446655440000/keys"),
+            "/orgs/***/keys"
+        );
+    }
+
+    #[test]
+    fn redact_path_ignores_pure_numeric_ids() {
+        // 20-digit order IDs are masked (len >= 20 + digits). Acceptable
+        // overmasking — dry-run favors safety. Short numeric IDs stay.
+        assert_eq!(redact_path("/orders/12345"), "/orders/12345");
+        assert_eq!(
+            redact_path("/orders/1234567890123"),
+            "/orders/1234567890123"
+        );
+    }
+
+    #[test]
+    fn redact_path_ignores_long_words() {
+        // Pure letters (no digit) are kept even if long.
+        assert_eq!(
+            redact_path("/repos/extraordinarilylongreponame/file"),
+            "/repos/extraordinarilylongreponame/file"
+        );
+    }
+
+    #[test]
+    fn redact_url_masks_token_in_path() {
+        let u = reqwest::Url::parse(
+            "https://api.example.com/v1/ghp_AbCdEf0123456789xyz0123456789AAAA/items",
+        )
+        .unwrap();
+        let out = redact_url(&u);
+        assert!(
+            out.contains("/v1/***/items"),
+            "path token not redacted: {}",
+            out
+        );
+        assert!(!out.contains("ghp_AbCdEf"), "plaintext leaked: {}", out);
     }
 
     #[test]
