@@ -82,6 +82,88 @@ fn is_sensitive_body_key(k: &str) -> bool {
         || lower == "apikey"
 }
 
+fn is_sensitive_query_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    if matches!(
+        lower.as_str(),
+        "key"
+            | "token"
+            | "access_token"
+            | "refresh_token"
+            | "id_token"
+            | "password"
+            | "passwd"
+            | "pwd"
+            | "secret"
+            | "client_secret"
+            | "auth"
+            | "authorization"
+            | "signature"
+            | "sig"
+            | "credentials"
+            | "session"
+            | "sessionid"
+            | "session_id"
+    ) {
+        return true;
+    }
+    lower.contains("token")
+        || lower.contains("secret")
+        || lower.contains("password")
+        || lower.contains("apikey")
+        || lower.contains("api_key")
+        || lower.contains("api-key")
+        || lower.ends_with("_key")
+        || lower.ends_with("-key")
+}
+
+pub fn redact_url(url: &reqwest::Url) -> String {
+    // Build a preview form; prioritize readability over exact URL roundtrip.
+    let mut out = String::new();
+    out.push_str(url.scheme());
+    out.push_str("://");
+    if !url.username().is_empty() {
+        out.push_str(url.username());
+        if url.password().is_some() {
+            out.push_str(":***");
+        }
+        out.push('@');
+    }
+    if let Some(host) = url.host_str() {
+        if host.contains(':') {
+            out.push('[');
+            out.push_str(host);
+            out.push(']');
+        } else {
+            out.push_str(host);
+        }
+    }
+    if let Some(port) = url.port() {
+        out.push(':');
+        out.push_str(&port.to_string());
+    }
+    out.push_str(url.path());
+    if url.query().is_some() {
+        out.push('?');
+        let pairs: Vec<String> = url
+            .query_pairs()
+            .map(|(k, v)| {
+                if is_sensitive_query_name(&k) {
+                    format!("{}=***", k)
+                } else {
+                    format!("{}={}", k, v)
+                }
+            })
+            .collect();
+        out.push_str(&pairs.join("&"));
+    }
+    if let Some(frag) = url.fragment() {
+        out.push('#');
+        out.push_str(frag);
+    }
+    out
+}
+
 pub fn render_dry_run(prepared: &PreparedRequest) -> String {
     let mut out = String::new();
     out.push_str("DRY RUN — request not sent\n\n");
@@ -89,7 +171,7 @@ pub fn render_dry_run(prepared: &PreparedRequest) -> String {
     out.push_str(&prepared.method);
     out.push_str("\n\n");
     out.push_str("URL:\n");
-    out.push_str(prepared.url.as_str());
+    out.push_str(&redact_url(&prepared.url));
     out.push_str("\n\n");
     out.push_str("Headers:\n");
     for h in &prepared.headers {
@@ -234,6 +316,86 @@ mod tests {
         assert!(out.contains("Authorization: Bearer ***\n"));
         assert!(out.contains("User-Agent: postagent/0.0.0   [auto-injected]\n"));
         assert!(out.contains("Body:\n{\"name\":\"a\"}\n"));
+    }
+
+    #[test]
+    fn redact_url_masks_sensitive_query_params() {
+        let u = reqwest::Url::parse(
+            "https://api.example.com/v1?api_key=sk_live_xyz&user=alice&access_token=AT",
+        )
+        .unwrap();
+        let out = redact_url(&u);
+        assert!(out.contains("api_key=***"), "api_key not redacted: {}", out);
+        assert!(
+            out.contains("access_token=***"),
+            "access_token not redacted: {}",
+            out
+        );
+        assert!(out.contains("user=alice"), "benign param lost: {}", out);
+    }
+
+    #[test]
+    fn redact_url_masks_additional_sensitive_names() {
+        // The rule favors false-positive redaction over leaking: any *_key /
+        // *-key query name is masked, even benign ones like sort_key. The
+        // preview's goal is "no secrets on stdout", not diff fidelity.
+        for (name, should_redact) in [
+            ("token", true),
+            ("id_token", true),
+            ("password", true),
+            ("sig", true),
+            ("client_secret", true),
+            ("refresh_token", true),
+            ("private_key", true),
+            ("account-key", true),
+            ("sort_key", true),
+            ("cache_key", true),
+            ("id", false),
+            ("page", false),
+            ("sort", false),
+            ("limit", false),
+        ] {
+            let u = reqwest::Url::parse(&format!("https://x/?{}={}", name, "value")).unwrap();
+            let out = redact_url(&u);
+            let redacted = out.contains(&format!("{}=***", name));
+            assert_eq!(
+                redacted, should_redact,
+                "name={} should_redact={} got={}",
+                name, should_redact, out
+            );
+        }
+    }
+
+    #[test]
+    fn redact_url_keeps_benign_query_intact() {
+        let u = reqwest::Url::parse("https://api.example.com/users?id=1&sort=name").unwrap();
+        assert_eq!(
+            redact_url(&u),
+            "https://api.example.com/users?id=1&sort=name"
+        );
+    }
+
+    #[test]
+    fn redact_url_masks_userinfo_password() {
+        let u = reqwest::Url::parse("https://alice:verysecret@api.example.com/v1").unwrap();
+        let out = redact_url(&u);
+        assert!(out.contains("alice:***@"), "password not redacted: {}", out);
+        assert!(!out.contains("verysecret"), "plaintext leaked: {}", out);
+    }
+
+    #[test]
+    fn redact_url_without_query_or_auth_unchanged() {
+        let u = reqwest::Url::parse("https://api.example.com/users/1").unwrap();
+        assert_eq!(redact_url(&u), "https://api.example.com/users/1");
+    }
+
+    #[test]
+    fn redact_url_preserves_port_and_fragment() {
+        let u = reqwest::Url::parse("https://api.example.com:8443/v1?api_key=k#anchor").unwrap();
+        let out = redact_url(&u);
+        assert!(out.starts_with("https://api.example.com:8443/v1?"));
+        assert!(out.contains("api_key=***"));
+        assert!(out.ends_with("#anchor"));
     }
 
     #[test]
