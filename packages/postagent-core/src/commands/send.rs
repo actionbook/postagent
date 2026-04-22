@@ -1,6 +1,7 @@
 use crate::request_preview::{render_dry_run, HeaderEntry, PreparedRequest};
 use crate::token::{referenced_sites, resolve_template_variables};
 use reqwest::blocking::Client;
+use reqwest::header::{HeaderName, HeaderValue};
 use std::net::IpAddr;
 use std::time::Duration;
 
@@ -62,6 +63,7 @@ fn prepare(
         // Sort JSON-mode multi-header payloads for deterministic ordering.
         parsed.sort_by(|a, b| a.0.to_ascii_lowercase().cmp(&b.0.to_ascii_lowercase()));
         for (k, v) in parsed {
+            validate_header(&k, &v)?;
             upsert_header(&mut merged, k, v, false);
         }
     }
@@ -103,6 +105,14 @@ fn prepare(
         headers: merged,
         body,
     })
+}
+
+fn validate_header(name: &str, value: &str) -> Result<(), String> {
+    HeaderName::from_bytes(name.as_bytes())
+        .map_err(|_| format!("Invalid HTTP header name: {:?}.", name))?;
+    HeaderValue::from_str(value)
+        .map_err(|_| format!("Invalid HTTP header value for {:?}.", name))?;
+    Ok(())
 }
 
 fn upsert_header(list: &mut Vec<HeaderEntry>, name: String, value: String, auto_injected: bool) {
@@ -446,6 +456,28 @@ mod tests {
                 err
             );
         }
+    }
+
+    #[test]
+    fn prepare_rejects_invalid_header_name() {
+        let headers = vec!["Bad Header: x".to_string()];
+        let err = prepare("https://example.com/", None, &headers, None).unwrap_err();
+        assert!(
+            err.contains("Invalid HTTP header name"),
+            "expected invalid-header-name error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn prepare_rejects_invalid_header_value() {
+        let headers = vec!["X-Test: ok\nbad".to_string()];
+        let err = prepare("https://example.com/", None, &headers, None).unwrap_err();
+        assert!(
+            err.contains("Invalid HTTP header value"),
+            "expected invalid-header-value error, got: {}",
+            err
+        );
     }
 
     #[test]
