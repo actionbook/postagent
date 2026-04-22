@@ -55,19 +55,20 @@ pub fn redact_header_value(value: &str) -> String {
 
 pub fn redact_body(body: &str) -> String {
     if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(body) {
-        if let Some(obj) = v.as_object_mut() {
-            let mut touched = false;
-            for (k, val) in obj.iter_mut() {
-                if is_sensitive_body_key(k) {
-                    *val = serde_json::Value::String("***".to_string());
-                    touched = true;
-                }
-            }
-            if touched {
-                return serde_json::to_string(&v).unwrap_or_else(|_| body.to_string());
-            }
+        if redact_json_value(&mut v, None) {
+            return serde_json::to_string(&v).unwrap_or_else(|_| "***".to_string());
         }
+        return body.to_string();
     }
+
+    if let Some(redacted) = redact_form_body(body) {
+        return redacted;
+    }
+
+    if looks_like_secret_body_value(body.trim()) {
+        return "***".to_string();
+    }
+
     body.to_string()
 }
 
@@ -80,6 +81,10 @@ fn is_sensitive_body_key(k: &str) -> bool {
         || lower == "api_key"
         || lower == "api-key"
         || lower == "apikey"
+}
+
+fn is_sensitive_form_field_name(name: &str) -> bool {
+    is_sensitive_body_key(name) || is_sensitive_query_name(name)
 }
 
 fn is_sensitive_query_name(name: &str) -> bool {
@@ -117,6 +122,24 @@ fn is_sensitive_query_name(name: &str) -> bool {
         || lower.ends_with("-key")
 }
 
+fn looks_like_secret_body_value(value: &str) -> bool {
+    if value.len() < 20 {
+        return false;
+    }
+
+    let mut has_letter = false;
+    let mut has_digit = false;
+    for b in value.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' => has_letter = true,
+            b'0'..=b'9' => has_digit = true,
+            b'_' | b'-' | b'.' | b'~' | b'+' | b'/' | b'=' => {}
+            _ => return false,
+        }
+    }
+    has_letter && has_digit
+}
+
 fn looks_like_secret_segment(seg: &str) -> bool {
     // Path segments that resolved from $POSTAGENT.<SITE>.<FIELD> templates
     // are opaque high-entropy strings (PATs, JWTs, signed keys). Catch them
@@ -136,6 +159,68 @@ fn looks_like_secret_segment(seg: &str) -> bool {
         }
     }
     has_letter && has_digit
+}
+
+fn redact_json_value(value: &mut serde_json::Value, parent_key: Option<&str>) -> bool {
+    if parent_key.is_some_and(is_sensitive_body_key) {
+        *value = serde_json::Value::String("***".to_string());
+        return true;
+    }
+
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut touched = false;
+            for (k, val) in map.iter_mut() {
+                touched |= redact_json_value(val, Some(k));
+            }
+            touched
+        }
+        serde_json::Value::Array(items) => {
+            let mut touched = false;
+            for item in items {
+                touched |= redact_json_value(item, None);
+            }
+            touched
+        }
+        serde_json::Value::String(s) => {
+            if looks_like_secret_body_value(s) {
+                *s = "***".to_string();
+                true
+            } else {
+                false
+            }
+        }
+        _ => false,
+    }
+}
+
+fn redact_form_body(body: &str) -> Option<String> {
+    if !body.contains('=') {
+        return None;
+    }
+
+    let mut saw_pair = false;
+    let mut parts = Vec::new();
+    for segment in body.split('&') {
+        if segment.is_empty() {
+            parts.push(String::new());
+            continue;
+        }
+
+        let (name, value) = segment.split_once('=')?;
+        saw_pair = true;
+        if is_sensitive_form_field_name(name) || looks_like_secret_body_value(value) {
+            parts.push(format!("{}=***", name));
+        } else {
+            parts.push(segment.to_string());
+        }
+    }
+
+    if saw_pair {
+        Some(parts.join("&"))
+    } else {
+        None
+    }
 }
 
 pub fn redact_path(path: &str) -> String {
@@ -158,7 +243,7 @@ pub fn redact_url(url: &reqwest::Url) -> String {
     out.push_str(url.scheme());
     out.push_str("://");
     if !url.username().is_empty() {
-        out.push_str(url.username());
+        out.push_str("***");
         if url.password().is_some() {
             out.push_str(":***");
         }
@@ -314,6 +399,29 @@ mod tests {
     }
 
     #[test]
+    fn redact_body_masks_raw_secret_like_non_json() {
+        let body = "ghp_AbCdEf0123456789xyz0123456789AAAA";
+        assert_eq!(redact_body(body), "***");
+    }
+
+    #[test]
+    fn redact_body_masks_form_encoded_sensitive_fields() {
+        let body = "user=alice&client_secret=supersecret&access_token=abc123xyz456";
+        assert_eq!(
+            redact_body(body),
+            "user=alice&client_secret=***&access_token=***"
+        );
+    }
+
+    #[test]
+    fn redact_body_masks_secret_like_json_strings() {
+        let body = r#"{"token":"ghp_AbCdEf0123456789xyz0123456789AAAA","note":"ok"}"#;
+        let redacted = redact_body(body);
+        assert!(redacted.contains(r#""token":"***""#));
+        assert!(redacted.contains(r#""note":"ok""#));
+    }
+
+    #[test]
     fn redact_body_passes_through_when_no_sensitive_keys() {
         let body = r#"{"name":"a","value":1}"#;
         assert_eq!(redact_body(body), body);
@@ -414,8 +522,17 @@ mod tests {
     fn redact_url_masks_userinfo_password() {
         let u = reqwest::Url::parse("https://alice:verysecret@api.example.com/v1").unwrap();
         let out = redact_url(&u);
-        assert!(out.contains("alice:***@"), "password not redacted: {}", out);
+        assert!(out.contains("***:***@"), "userinfo not redacted: {}", out);
+        assert!(!out.contains("alice"), "username leaked: {}", out);
         assert!(!out.contains("verysecret"), "plaintext leaked: {}", out);
+    }
+
+    #[test]
+    fn redact_url_masks_userinfo_username_without_password() {
+        let u = reqwest::Url::parse("https://alice@api.example.com/v1").unwrap();
+        let out = redact_url(&u);
+        assert!(out.contains("***@"), "username not redacted: {}", out);
+        assert!(!out.contains("alice"), "username leaked: {}", out);
     }
 
     #[test]
