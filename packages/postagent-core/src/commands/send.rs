@@ -58,6 +58,7 @@ fn prepare(
 
     let mut merged: Vec<HeaderEntry> = Vec::new();
     for raw in headers {
+        reject_token_templates_in_header_names(raw)?;
         let resolved = resolve_template_variables(raw)?;
         let mut parsed = parse_header(&resolved);
         // Sort JSON-mode multi-header payloads for deterministic ordering.
@@ -112,6 +113,15 @@ fn validate_header(name: &str, value: &str) -> Result<(), String> {
         .map_err(|_| format!("Invalid HTTP header name: {:?}.", name))?;
     HeaderValue::from_str(value)
         .map_err(|_| format!("Invalid HTTP header value for {:?}.", name))?;
+    Ok(())
+}
+
+fn reject_token_templates_in_header_names(raw: &str) -> Result<(), String> {
+    for (name, _) in parse_header(raw) {
+        if contains_token_template(&name) {
+            return Err("Header names must not contain $POSTAGENT templates.".to_string());
+        }
+    }
     Ok(())
 }
 
@@ -478,6 +488,20 @@ mod tests {
             "expected invalid-header-value error, got: {}",
             err
         );
+    }
+
+    #[test]
+    fn prepare_rejects_token_template_in_header_name() {
+        let headers = vec!["$POSTAGENT.GITHUB.TOKEN: x".to_string()];
+        let err = prepare("https://example.com/", None, &headers, None).unwrap_err();
+        assert_eq!(err, "Header names must not contain $POSTAGENT templates.");
+    }
+
+    #[test]
+    fn prepare_rejects_token_template_in_json_header_name() {
+        let headers = vec![r#"{"$POSTAGENT.GITHUB.TOKEN":"x"}"#.to_string()];
+        let err = prepare("https://example.com/", None, &headers, None).unwrap_err();
+        assert_eq!(err, "Header names must not contain $POSTAGENT templates.");
     }
 
     #[test]
