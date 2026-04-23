@@ -1,6 +1,6 @@
 # Postagent
 
-Postman CLI, but for AI Agents. Discover, browse, and send requests to thousands of APIs.
+A CLI that lets your AI agent call any API correctly. Natural-language search, structured manuals, pre-wired auth, and credentials that never enter the LLM context.
 
 ## Install
 
