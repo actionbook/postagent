@@ -1,11 +1,11 @@
 use std::collections::HashSet;
 
-use reqwest::blocking::Client;
 use serde::Deserialize;
 
 use crate::api_response;
 use crate::config;
 use crate::formatter;
+use crate::http_client;
 
 #[derive(Deserialize)]
 struct SearchAction {
@@ -42,7 +42,7 @@ struct FlatRow {
 }
 
 pub fn run(query: &str, json: bool) -> Result<(), Box<dyn std::error::Error>> {
-    let client = Client::new();
+    let client = http_client::server_client();
     let url = format!("{}/api/search?q={}", config::api_base(), urlencoding(query));
 
     let mut request = client.get(&url);
@@ -51,13 +51,18 @@ pub fn run(query: &str, json: bool) -> Result<(), Box<dyn std::error::Error>> {
     }
     let response = match request.send() {
         Ok(resp) => resp,
-        Err(_) => {
-            eprintln!("Failed to connect to postagent server.");
+        Err(err) => {
+            eprintln!("{}", http_client::format_server_error(&err));
             std::process::exit(1);
         }
     };
 
     if !response.status().is_success() {
+        let status = response.status().as_u16();
+        if let Some(msg) = http_client::format_transient_status(status) {
+            eprintln!("{}", msg);
+            std::process::exit(1);
+        }
         let body: serde_json::Value = response.json()?;
         api_response::print_api_error(&body);
         std::process::exit(1);

@@ -5,6 +5,7 @@ mod config;
 mod descriptor;
 mod error;
 mod formatter;
+mod http_client;
 mod markdown;
 mod oauth;
 mod request_preview;
