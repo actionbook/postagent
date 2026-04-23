@@ -4,6 +4,7 @@ use base64::Engine;
 use reqwest::blocking::Client;
 use serde_json::Value;
 use std::collections::BTreeMap;
+use std::net::IpAddr;
 use std::time::Duration;
 
 #[derive(Debug, Clone, Default)]
@@ -53,6 +54,12 @@ pub(crate) fn post_token_request(
     client_secret: Option<&str>,
     grant_specific_params: Vec<(String, String)>,
 ) -> Result<TokenResponse, String> {
+    // Refuse to leak refresh_token / client_secret to a cleartext endpoint.
+    // Validate the URL BEFORE we compose any sensitive payload so a misrouted
+    // descriptor fails closed. Loopback http is allowed for the unit tests'
+    // mock servers.
+    let safe_url = validated_token_url(&method.token.url)?;
+
     let body_encoding = method.token.body_encoding.as_str();
     let client_auth = method.token.client_auth.as_str();
 
@@ -75,7 +82,7 @@ pub(crate) fn post_token_request(
         .build()
         .map_err(|e| format!("failed to build HTTP client: {}", e))?;
 
-    let mut req = client.post(&method.token.url);
+    let mut req = client.post(safe_url);
 
     if use_basic {
         let secret = client_secret.unwrap_or("");
@@ -117,6 +124,37 @@ pub(crate) fn post_token_request(
     }
 
     parse_token_response(&text, &method.token.response_map)
+}
+
+/// Reject token endpoints that would transmit OAuth credentials (refresh_token,
+/// client_secret, authorization_code) over cleartext. Mirrors the loopback
+/// allowance in `commands/send.rs::validated_send_url` so unit tests can run a
+/// mock server on `http://127.0.0.1:NNNN/token`.
+fn validated_token_url(raw_url: &str) -> Result<reqwest::Url, String> {
+    let url = reqwest::Url::parse(raw_url)
+        .map_err(|_| format!("invalid OAuth token endpoint URL: {}", raw_url))?;
+
+    if url.scheme() == "https" {
+        return Ok(url);
+    }
+    if url.scheme() == "http" {
+        if let Some(host) = url.host_str() {
+            let normalized = host.trim_start_matches('[').trim_end_matches(']');
+            let is_loopback = normalized.eq_ignore_ascii_case("localhost")
+                || normalized
+                    .parse::<IpAddr>()
+                    .map(|ip| ip.is_loopback())
+                    .unwrap_or(false);
+            if is_loopback {
+                return Ok(url);
+            }
+        }
+    }
+
+    Err(format!(
+        "Refusing to POST OAuth credentials to a non-HTTPS token endpoint: {}",
+        raw_url
+    ))
 }
 
 fn parse_token_response(text: &str, rm: &ResponseMap) -> Result<TokenResponse, String> {
@@ -188,6 +226,52 @@ mod tests {
     };
     use std::io::{Read, Write};
     use std::net::TcpListener;
+
+    #[test]
+    fn validated_token_url_accepts_https() {
+        assert!(validated_token_url("https://accounts.google.com/o/oauth2/token").is_ok());
+    }
+
+    #[test]
+    fn validated_token_url_accepts_loopback_http() {
+        for url in [
+            "http://localhost:9876/token",
+            "http://127.0.0.1:9876/token",
+            "http://[::1]:9876/token",
+        ] {
+            assert!(
+                validated_token_url(url).is_ok(),
+                "{} should be allowed",
+                url
+            );
+        }
+    }
+
+    #[test]
+    fn validated_token_url_rejects_remote_http() {
+        let err = validated_token_url("http://accounts.example.com/token").unwrap_err();
+        assert!(err.contains("non-HTTPS token endpoint"));
+    }
+
+    #[test]
+    fn validated_token_url_rejects_unparseable() {
+        let err = validated_token_url("not a url").unwrap_err();
+        assert!(err.contains("invalid OAuth token endpoint URL"));
+    }
+
+    #[test]
+    fn post_token_request_refuses_cleartext_remote_endpoint() {
+        let mut method = make_method("https://placeholder/", "form", "body");
+        method.token.url = "http://accounts.example.com/token".into();
+        let err = post_token_request(
+            &method,
+            "cid",
+            Some("csec"),
+            vec![("grant_type".into(), "refresh_token".into())],
+        )
+        .unwrap_err();
+        assert!(err.contains("non-HTTPS token endpoint"));
+    }
 
     fn make_method(token_url: &str, body_encoding: &str, client_auth: &str) -> OAuth2AuthMethod {
         OAuth2AuthMethod {
