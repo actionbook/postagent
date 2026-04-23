@@ -165,9 +165,16 @@ Token substitution:
   credentials are intentionally non-retrievable. Pass $POSTAGENT.<SITE>.TOKEN
   (etc.) as a literal string in -H / -d / URL — `send` will resolve it.
 
+Body input (curl-compatible):
+  -d <value>     Use <value> as the request body verbatim
+  -d @<path>     Read the request body from file <path>
+  -d @-          Read the request body from stdin
+
 Examples:
   postagent send https://api.example.com/users
   postagent send https://api.example.com/users -X POST -d '{\"name\":\"alice\"}'
+  postagent send https://api.example.com/users -X POST -d @./payload.json
+  cat payload.json | postagent send https://api.example.com/users -X POST -d @-
   postagent send https://api.github.com/user -H 'Authorization: Bearer $POSTAGENT.GITHUB.TOKEN'
   postagent send https://api.github.com/user -H 'Authorization: Bearer $POSTAGENT.GITHUB.TOKEN' --dry-run")]
     Send {
@@ -179,7 +186,8 @@ Examples:
         /// Request header (repeatable)
         #[arg(short = 'H', long, num_args = 1)]
         header: Vec<String>,
-        /// Request body
+        /// Request body. Prefix with `@<path>` to read from a file, or use `@-`
+        /// to read from stdin (curl-compatible). Inline values pass through verbatim.
         #[arg(short = 'd', long)]
         data: Option<String>,
         /// Preview the final request (method, URL, headers, body) without sending

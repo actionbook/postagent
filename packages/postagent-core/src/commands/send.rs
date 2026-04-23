@@ -2,6 +2,7 @@ use crate::request_preview::{render_dry_run, HeaderEntry, PreparedRequest};
 use crate::token::{referenced_sites, resolve_template_variables};
 use reqwest::blocking::Client;
 use reqwest::header::{HeaderName, HeaderValue};
+use std::io::Read;
 use std::net::IpAddr;
 use std::time::Duration;
 
@@ -225,6 +226,18 @@ pub fn run(
     data: Option<&str>,
     dry_run: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // Resolve `-d @file` / `-d @-` (read body from file / stdin) before the
+    // token check so the file's contents — not the literal "@..." path —
+    // participate in $POSTAGENT.* validation and substitution.
+    let resolved_data = match resolve_data_arg(data) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("{}", e);
+            std::process::exit(1);
+        }
+    };
+    let data = resolved_data.as_deref();
+
     let has_token = contains_token_template(raw_url)
         || headers.iter().any(|h| contains_token_template(h))
         || data.is_some_and(contains_token_template);
@@ -254,6 +267,32 @@ pub fn run(
         body: data.unwrap_or("").to_string(),
     };
     execute(&prepared, &pre)
+}
+
+fn read_body_from_path(path: &str) -> Result<String, String> {
+    std::fs::read_to_string(path)
+        .map_err(|e| format!("Failed to read body from file {:?}: {}", path, e))
+}
+
+fn read_body_from_stdin() -> Result<String, String> {
+    let mut buf = String::new();
+    std::io::stdin()
+        .read_to_string(&mut buf)
+        .map_err(|e| format!("Failed to read body from stdin: {}", e))?;
+    Ok(buf)
+}
+
+/// Mirrors curl's `-d @file` / `-d @-` shorthand: when `data` begins with `@`,
+/// the rest is a path to read (or `-` for stdin). Inline values pass through
+/// verbatim. Resolution happens up front so $POSTAGENT.* substitution and the
+/// token-presence check operate on the actual body content, not on the path.
+fn resolve_data_arg(data: Option<&str>) -> Result<Option<String>, String> {
+    match data {
+        None => Ok(None),
+        Some("@-") => read_body_from_stdin().map(Some),
+        Some(d) if d.starts_with('@') => read_body_from_path(&d[1..]).map(Some),
+        Some(d) => Ok(Some(d.to_string())),
+    }
 }
 
 fn parse_header(raw: &str) -> Vec<(String, String)> {
@@ -509,6 +548,53 @@ mod tests {
         for m in ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] {
             prepare("https://example.com/", Some(m), &[], None)
                 .unwrap_or_else(|e| panic!("method {} should be valid: {}", m, e));
+        }
+    }
+
+    #[test]
+    fn resolve_data_arg_passes_inline_value_through() {
+        let resolved = resolve_data_arg(Some(r#"{"a":1}"#)).unwrap();
+        assert_eq!(resolved.as_deref(), Some(r#"{"a":1}"#));
+    }
+
+    #[test]
+    fn resolve_data_arg_returns_none_for_none() {
+        assert!(resolve_data_arg(None).unwrap().is_none());
+    }
+
+    #[test]
+    fn resolve_data_arg_reads_file_when_prefixed_with_at() {
+        use std::io::Write;
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        write!(f, r#"{{"name":"alice"}}"#).unwrap();
+        let arg = format!("@{}", f.path().display());
+        let resolved = resolve_data_arg(Some(&arg)).unwrap();
+        assert_eq!(resolved.as_deref(), Some(r#"{"name":"alice"}"#));
+    }
+
+    #[test]
+    fn resolve_data_arg_errors_when_file_missing() {
+        let err = resolve_data_arg(Some("@/no/such/path/postagent-test-1234567890")).unwrap_err();
+        assert!(
+            err.starts_with("Failed to read body from file"),
+            "unexpected msg: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn resolve_data_arg_routes_at_dash_to_stdin_branch() {
+        // We can't easily feed real stdin in a unit test, so assert that the
+        // dispatch reaches the stdin reader by recognising its error shape if
+        // stdin is unavailable. This guards against accidental fall-through
+        // to the file-path branch (which would try to read a file named "-").
+        match resolve_data_arg(Some("@-")) {
+            Ok(_) => { /* stdin happened to be readable / EOF — fine */ }
+            Err(e) => assert!(
+                e.starts_with("Failed to read body from stdin"),
+                "wrong dispatch for @-, got: {}",
+                e
+            ),
         }
     }
 }
