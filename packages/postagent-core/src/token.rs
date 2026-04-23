@@ -223,6 +223,13 @@ pub fn provider_for_site(site: &str) -> Option<String> {
     load_provider_pointer(&home(), site)
 }
 
+/// Canonical on-disk path for this site's `auth.yaml`. Two sites share auth
+/// iff they resolve to the same path — useful as a dedupe key when a
+/// rotating refresh_token must not be spent twice against the same file.
+pub fn auth_storage_path(site: &str) -> PathBuf {
+    auth_file(&home(), site)
+}
+
 pub fn logout(site: &str) -> Result<(), Box<dyn std::error::Error>> {
     logout_in(&home(), site)
 }

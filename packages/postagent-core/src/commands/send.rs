@@ -1,8 +1,6 @@
 use crate::oauth::refresh::refresh_access_token;
 use crate::request_preview::{render_dry_run, HeaderEntry, PreparedRequest};
-use crate::token::{
-    self, provider_for_site, referenced_sites, resolve_template_variables, AuthKind,
-};
+use crate::token::{self, referenced_sites, resolve_template_variables, AuthKind};
 use reqwest::blocking::{Client, Response};
 use reqwest::header::{HeaderName, HeaderValue};
 use std::net::IpAddr;
@@ -273,11 +271,12 @@ fn send_or_exit(result: Result<Response, reqwest::Error>) -> Response {
 
 /// Refresh OAuth access tokens for every referenced site that uses OAuth.
 /// Returns the number of credentials successfully refreshed; 0 means caller
-/// should not retry. Provider-shared sites are deduped so a rotating
-/// refresh_token is spent at most once per provider.
+/// should not retry. Sites that resolve to the same on-disk auth.yaml (for
+/// example, sibling sites sharing a provider pointer) are deduped so a
+/// rotating refresh_token is spent at most once against that file.
 fn try_refresh_referenced_oauth_credentials(pre: &PreSubstitutionInputs) -> usize {
     let sites = referenced_sites(&pre.template_inputs());
-    let mut seen_keys: Vec<String> = Vec::new();
+    let mut seen_paths: Vec<std::path::PathBuf> = Vec::new();
     let mut refreshed = 0usize;
     for site in &sites {
         let auth = match token::load_auth(site) {
@@ -287,14 +286,14 @@ fn try_refresh_referenced_oauth_credentials(pre: &PreSubstitutionInputs) -> usiz
         if auth.effective_kind() != AuthKind::Oauth2 {
             continue;
         }
-        // Sites that point at a shared provider all back the same auth.yaml,
-        // so dedupe by provider name (or by site when no pointer exists) to
-        // avoid burning a rotating refresh_token twice. Only record the key
-        // on success — if the first sibling's refresh fails (e.g. descriptor
-        // lookup blip or saved method renamed), a later sibling under the
-        // same provider still gets a chance to succeed.
-        let key = provider_for_site(site).unwrap_or_else(|| site.clone());
-        if seen_keys.contains(&key) {
+        // Key by the actual auth.yaml path so we only collapse siblings that
+        // truly share storage. A site whose provider pointer exists but
+        // whose shared file has not been written yet still resolves to its
+        // site-local auth.yaml, and deserves its own refresh attempt. Only
+        // record the key on success — if the first attempt fails, a later
+        // sibling sharing the same file still gets a chance.
+        let key = token::auth_storage_path(site);
+        if seen_paths.contains(&key) {
             continue;
         }
 
@@ -302,7 +301,7 @@ fn try_refresh_referenced_oauth_credentials(pre: &PreSubstitutionInputs) -> usiz
             Ok(()) => {
                 eprintln!("postagent: refreshed OAuth token for {}; retrying", site);
                 refreshed += 1;
-                seen_keys.push(key);
+                seen_paths.push(key);
             }
             Err(e) => {
                 eprintln!("postagent: auto-refresh failed for {}: {}", site, e);
