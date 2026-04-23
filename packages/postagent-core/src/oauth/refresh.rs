@@ -44,10 +44,21 @@ fn refresh_access_token_at(
     let methods = fetch_methods(site)?;
     let saved_method_id = auth.effective_method_id().to_string();
     let method = pick_oauth_method(&methods, &saved_method_id).ok_or_else(|| {
-        format!(
-            "{}: descriptor has no OAuth method matching saved id \"{}\"",
-            site, saved_method_id
-        )
+        let oauth_count = methods
+            .iter()
+            .filter(|m| matches!(m, AuthMethod::Oauth2(_)))
+            .count();
+        if oauth_count > 1 {
+            format!(
+                "{}: descriptor exposes {} OAuth methods and none match saved id \"{}\"; re-run `postagent auth {}`",
+                site, oauth_count, saved_method_id, site
+            )
+        } else {
+            format!(
+                "{}: descriptor has no OAuth method matching saved id \"{}\"",
+                site, saved_method_id
+            )
+        }
     })?;
 
     let grant_params = vec![
@@ -71,28 +82,33 @@ fn fetch_site_descriptor(site: &str) -> Result<Vec<AuthMethod>, Box<dyn std::err
     Ok(crate::commands::manual::fetch_site_auth_methods(site)?.unwrap_or_default())
 }
 
-/// Pick the OAuth method that matches the saved `method_id`, falling back to
-/// the first OAuth method if none match. (Saved id can drift if the server
-/// renames a method; falling back keeps refresh working when there's only one
-/// option anyway.)
+/// Pick the OAuth method that matches the saved `method_id`. If none match,
+/// fall back to the descriptor's only OAuth method when it is unambiguous
+/// (the server may have renamed a single method). If the descriptor exposes
+/// multiple OAuth methods and none match, return `None` so the caller can
+/// surface an error — silently picking the first would risk POSTing the
+/// refresh grant to the wrong token endpoint and persisting the token under
+/// the wrong method.
 fn pick_oauth_method<'a>(
     methods: &'a [AuthMethod],
     saved_method_id: &str,
 ) -> Option<&'a OAuth2AuthMethod> {
-    let mut by_id: Option<&OAuth2AuthMethod> = None;
-    let mut first_oauth: Option<&OAuth2AuthMethod> = None;
-    for m in methods {
-        if let AuthMethod::Oauth2(o) = m {
-            if first_oauth.is_none() {
-                first_oauth = Some(o);
-            }
-            if o.id == saved_method_id {
-                by_id = Some(o);
-                break;
-            }
-        }
+    let oauth_methods: Vec<&OAuth2AuthMethod> = methods
+        .iter()
+        .filter_map(|m| match m {
+            AuthMethod::Oauth2(o) => Some(o),
+            _ => None,
+        })
+        .collect();
+
+    if let Some(matched) = oauth_methods.iter().find(|o| o.id == saved_method_id) {
+        return Some(*matched);
     }
-    by_id.or(first_oauth)
+
+    match oauth_methods.as_slice() {
+        [only] => Some(*only),
+        _ => None,
+    }
 }
 
 fn merge_refresh_into_auth(
@@ -431,11 +447,48 @@ mod tests {
     }
 
     #[test]
-    fn pick_oauth_method_falls_back_to_first_when_id_absent() {
+    fn pick_oauth_method_falls_back_when_single_method() {
         let m1 = make_method("https://a/", "form", "body");
         let methods = vec![AuthMethod::Oauth2(m1.clone())];
         let picked = pick_oauth_method(&methods, "does-not-exist").unwrap();
         assert_eq!(picked.id, "oauth");
+    }
+
+    #[test]
+    fn pick_oauth_method_refuses_fallback_when_multiple_methods() {
+        let m1 = make_method("https://a/", "form", "body");
+        let mut m2 = make_method("https://b/", "form", "body");
+        m2.id = "alt".into();
+
+        let methods = vec![
+            AuthMethod::Oauth2(m1.clone()),
+            AuthMethod::Oauth2(m2.clone()),
+        ];
+        assert!(pick_oauth_method(&methods, "does-not-exist").is_none());
+    }
+
+    #[test]
+    fn refresh_errors_when_saved_id_missing_and_multiple_methods() {
+        let tmp = TempDir::new().unwrap();
+        let m1 = make_method("https://unused-a/", "form", "body");
+        let mut m2 = make_method("https://unused-b/", "form", "body");
+        m2.id = "alt".into();
+        // Seed with m1's id, but return a descriptor where neither method id
+        // matches — simulates the server renaming the saved method.
+        seed_oauth_state(tmp.path(), "foo", &m1, "old_at", Some("old_rt"));
+        let mut renamed = m1.clone();
+        renamed.id = "renamed".into();
+
+        let err = refresh_access_token_at(tmp.path(), "foo", move |_| {
+            Ok(vec![
+                AuthMethod::Oauth2(renamed.clone()),
+                AuthMethod::Oauth2(m2.clone()),
+            ])
+        })
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("2 OAuth methods"), "msg was: {}", msg);
+        assert!(msg.contains("none match"), "msg was: {}", msg);
     }
 
     #[test]
