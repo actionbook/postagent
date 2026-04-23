@@ -1,5 +1,25 @@
 # postagent-darwin-x64
 
+## 0.3.1
+
+### Patch Changes
+
+- [#21](https://github.com/actionbook/postagent/pull/21) [`c80ae6b`](https://github.com/actionbook/postagent/commit/c80ae6bc110aadb4533fb4abe9b3006ca4ad144d) Thanks [@4bmis](https://github.com/4bmis)! - fix: surface friendlier errors when the postagent server is slow or unreachable.
+
+  - `postagent search` and `postagent manual` now use a dedicated HTTP client with a 45s request timeout, so a hung connection fails with an actionable message instead of hanging indefinitely behind reqwest's default (no timeout).
+  - Request failures are categorized: timeouts print "Request to postagent server timed out after 45s. The server may be busy; try again in a few seconds.", connect failures print "Could not reach postagent server. Check your network connection, then try again.", and other reqwest errors fall through to a labelled "Request to postagent server failed: …" line so unusual cases stay diagnosable.
+  - HTTP 502/503/504 responses from the postagent server now print a transient-retry hint ("This is usually transient; try again in a few seconds.") instead of being surfaced as a generic API error, which was misleading when the underlying cause was a cold-start or upstream blip.
+
+- [#19](https://github.com/actionbook/postagent/pull/19) [`ed62224`](https://github.com/actionbook/postagent/commit/ed622245639d65a459f321d873d190a3c85c33f2) Thanks [@4bmis](https://github.com/4bmis)! - feat(send): add `--dry-run` to preview the final request without sending it.
+
+  - `postagent send ... --dry-run` runs the full preprocessing pipeline (`$POSTAGENT.*` template substitution, method inference, header merging, User-Agent injection) and prints the resolved method, URL, headers, and body, but makes no outbound request.
+  - Auto-injected headers (e.g. `User-Agent`) are marked in the output with `[auto-injected]`.
+  - Sensitive headers (`Authorization`, `Cookie`, `Set-Cookie`, `Proxy-Authorization`, `x-api-key`, and any name matching `*secret*`, `*password*`, `*-token`, `*-key`, `*-auth`) are redacted; `Bearer`/`Basic`/`Digest`/`Token` scheme prefixes are preserved.
+  - Sensitive URL query parameters (`token`, `access_token`, `api_key`, `password`, `secret`, `client_secret`, `sig`/`signature`, and any `*_key`/`*-key` name) are redacted. Opaque credential-like URL path segments are redacted, URL fragments are filtered through the same conservative redaction rules, and any URL userinfo credentials are masked (`***:***@host`, `***@host`). Benign query params pass through unchanged.
+  - Bodies are redacted conservatively: JSON fields with sensitive names are masked, form-encoded sensitive fields are masked, and opaque secret-like raw body payloads are replaced with `***`.
+  - Exit code is `0` for a successful dry run and non-zero for invalid templates, invalid URLs, or other prepare-time errors.
+  - Request preparation is factored into a shared `request_preview::PreparedRequest` so future commands can reuse the preview pipeline.
+
 ## 0.3.0
 
 ### Minor Changes
