@@ -1,9 +1,9 @@
 ---
-"postagent": minor
-"postagent-darwin-arm64": minor
-"postagent-darwin-x64": minor
-"postagent-linux-arm64-gnu": minor
-"postagent-linux-x64-gnu": minor
+"postagent": patch
+"postagent-darwin-arm64": patch
+"postagent-darwin-x64": patch
+"postagent-linux-arm64-gnu": patch
+"postagent-linux-x64-gnu": patch
 ---
 
 feat(send): add `--dry-run` to preview the final request without sending it.
