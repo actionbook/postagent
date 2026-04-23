@@ -1,6 +1,9 @@
+use crate::oauth::refresh::refresh_access_token;
 use crate::request_preview::{render_dry_run, HeaderEntry, PreparedRequest};
-use crate::token::{referenced_sites, resolve_template_variables};
-use reqwest::blocking::Client;
+use crate::token::{
+    self, provider_for_site, referenced_sites, resolve_template_variables, AuthKind,
+};
+use reqwest::blocking::{Client, Response};
 use reqwest::header::{HeaderName, HeaderValue};
 use std::net::IpAddr;
 use std::time::Duration;
@@ -41,10 +44,29 @@ fn validated_send_url(raw_url: &str) -> Result<reqwest::Url, String> {
     }
 }
 
+/// Captures the original CLI args before template substitution. Two reasons
+/// we need them after `prepare()`: (1) to surface site names in the expired-
+/// token hint without leaking resolved secrets, and (2) to re-prepare the
+/// request after an OAuth auto-refresh so it picks up the new access_token.
 struct PreSubstitutionInputs {
     url: String,
+    method: Option<String>,
     headers: Vec<String>,
-    body: String,
+    data: Option<String>,
+}
+
+impl PreSubstitutionInputs {
+    fn template_inputs(&self) -> Vec<&str> {
+        let mut out: Vec<&str> = Vec::with_capacity(2 + self.headers.len());
+        out.push(self.url.as_str());
+        if let Some(d) = &self.data {
+            out.push(d.as_str());
+        }
+        for h in &self.headers {
+            out.push(h.as_str());
+        }
+        out
+    }
 }
 
 fn prepare(
@@ -138,14 +160,12 @@ fn upsert_header(list: &mut Vec<HeaderEntry>, name: String, value: String, auto_
     });
 }
 
-fn execute(
-    prepared: &PreparedRequest,
-    pre: &PreSubstitutionInputs,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn send_request_once(prepared: &PreparedRequest) -> Result<Response, reqwest::Error> {
     // Re-run validated_send_url in this function so the sanitizer is
     // visible to static-analysis taint tracking in the same scope as the
     // reqwest sinks below. prepare() already validated once.
-    let safe_url = validated_send_url(prepared.url.as_str())?;
+    let safe_url = validated_send_url(prepared.url.as_str())
+        .expect("prepare() already validated url; should not fail here");
 
     let client = Client::builder().timeout(Duration::from_secs(30)).build()?;
 
@@ -157,7 +177,8 @@ fn execute(
         "DELETE" => client.delete(safe_url.clone()),
         "HEAD" => client.head(safe_url.clone()),
         other => client.request(
-            reqwest::Method::from_bytes(other.as_bytes())?,
+            reqwest::Method::from_bytes(other.as_bytes())
+                .expect("prepare() validated method; should not fail here"),
             safe_url.clone(),
         ),
     };
@@ -170,16 +191,37 @@ fn execute(
         request = request.body(b.clone());
     }
 
-    let response = match request.send() {
-        Ok(resp) => resp,
-        Err(e) => {
-            if e.is_builder() {
-                eprintln!("Invalid URL after template resolution.");
-            } else {
+    request.send()
+}
+
+fn execute(
+    prepared: &PreparedRequest,
+    pre: &PreSubstitutionInputs,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let response = send_or_exit(send_request_once(prepared));
+
+    // OAuth auto-refresh on 401/403: try refreshing any OAuth-typed credential
+    // referenced by the request, then re-issue the request once. We only
+    // attempt refresh if at least one referenced credential is OAuth — static
+    // tokens have nothing to refresh.
+    let response = if matches!(response.status().as_u16(), 401 | 403)
+        && try_refresh_referenced_oauth_credentials(pre) > 0
+    {
+        let reprepared = match prepare(
+            &pre.url,
+            pre.method.as_deref(),
+            &pre.headers,
+            pre.data.as_deref(),
+        ) {
+            Ok(p) => p,
+            Err(e) => {
                 eprintln!("{}", e);
+                std::process::exit(1);
             }
-            std::process::exit(1);
-        }
+        };
+        send_or_exit(send_request_once(&reprepared))
+    } else {
+        response
     };
 
     let status = response.status();
@@ -194,10 +236,7 @@ fn execute(
 
         if status.as_u16() == 401 || status.as_u16() == 403 {
             eprintln!();
-            let header_refs: Vec<&str> = pre.headers.iter().map(|s| s.as_str()).collect();
-            let mut inputs: Vec<&str> = vec![pre.url.as_str(), pre.body.as_str()];
-            inputs.extend(header_refs);
-            let sites = referenced_sites(&inputs);
+            let sites = referenced_sites(&pre.template_inputs());
             if sites.is_empty() {
                 eprintln!("Your access token may be expired. Run: postagent auth <site>");
             } else if sites.len() == 1 {
@@ -216,6 +255,58 @@ fn execute(
     }
 
     Ok(())
+}
+
+fn send_or_exit(result: Result<Response, reqwest::Error>) -> Response {
+    match result {
+        Ok(resp) => resp,
+        Err(e) => {
+            if e.is_builder() {
+                eprintln!("Invalid URL after template resolution.");
+            } else {
+                eprintln!("{}", e);
+            }
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Refresh OAuth access tokens for every referenced site that uses OAuth.
+/// Returns the number of credentials successfully refreshed; 0 means caller
+/// should not retry. Provider-shared sites are deduped so a rotating
+/// refresh_token is spent at most once per provider.
+fn try_refresh_referenced_oauth_credentials(pre: &PreSubstitutionInputs) -> usize {
+    let sites = referenced_sites(&pre.template_inputs());
+    let mut seen_keys: Vec<String> = Vec::new();
+    let mut refreshed = 0usize;
+    for site in &sites {
+        let auth = match token::load_auth(site) {
+            Some(a) => a,
+            None => continue,
+        };
+        if auth.effective_kind() != AuthKind::Oauth2 {
+            continue;
+        }
+        // Sites that point at a shared provider all back the same auth.yaml,
+        // so dedupe by provider name (or by site when no pointer exists) to
+        // avoid burning a rotating refresh_token twice.
+        let key = provider_for_site(site).unwrap_or_else(|| site.clone());
+        if seen_keys.contains(&key) {
+            continue;
+        }
+        seen_keys.push(key);
+
+        match refresh_access_token(site) {
+            Ok(()) => {
+                eprintln!("postagent: refreshed OAuth token for {}; retrying", site);
+                refreshed += 1;
+            }
+            Err(e) => {
+                eprintln!("postagent: auto-refresh failed for {}: {}", site, e);
+            }
+        }
+    }
+    refreshed
 }
 
 pub fn run(
@@ -250,8 +341,9 @@ pub fn run(
 
     let pre = PreSubstitutionInputs {
         url: raw_url.to_string(),
+        method: method.map(String::from),
         headers: headers.to_vec(),
-        body: data.unwrap_or("").to_string(),
+        data: data.map(String::from),
     };
     execute(&prepared, &pre)
 }

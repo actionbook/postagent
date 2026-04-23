@@ -2,6 +2,7 @@ pub mod browser;
 pub mod exchange;
 pub mod loopback;
 pub mod pkce;
+pub mod refresh;
 pub mod state;
 
 pub const REDIRECT_URI: &str = "http://127.0.0.1:9876/callback";

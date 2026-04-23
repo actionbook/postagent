@@ -1,4 +1,4 @@
-use crate::descriptor::OAuth2AuthMethod;
+use crate::descriptor::{OAuth2AuthMethod, ResponseMap};
 use base64::engine::general_purpose::STANDARD as B64_STD;
 use base64::Engine;
 use reqwest::blocking::Client;
@@ -29,26 +29,43 @@ pub struct ExchangeInputs<'a> {
 /// a populated `TokenResponse` with fields extracted via RFC 6901 pointers
 /// from `response_map`.
 pub fn exchange(inputs: ExchangeInputs<'_>) -> Result<TokenResponse, String> {
-    let body_encoding = inputs.method.token.body_encoding.as_str();
-    let client_auth = inputs.method.token.client_auth.as_str();
-
-    let mut params: Vec<(String, String)> = vec![
+    let grant_params: Vec<(String, String)> = vec![
         ("grant_type".into(), "authorization_code".into()),
         ("code".into(), inputs.code.into()),
         ("redirect_uri".into(), inputs.redirect_uri.into()),
         ("code_verifier".into(), inputs.code_verifier.into()),
     ];
+    post_token_request(
+        inputs.method,
+        inputs.client_id,
+        inputs.client_secret,
+        grant_params,
+    )
+}
+
+/// Shared OAuth token-endpoint POST. Both authorization_code exchange and
+/// refresh_token refresh share the same descriptor mechanics (body_encoding,
+/// client_auth, response_map); callers supply only the grant-specific
+/// parameters and this helper attaches client credentials per `client_auth`.
+pub(crate) fn post_token_request(
+    method: &OAuth2AuthMethod,
+    client_id: &str,
+    client_secret: Option<&str>,
+    grant_specific_params: Vec<(String, String)>,
+) -> Result<TokenResponse, String> {
+    let body_encoding = method.token.body_encoding.as_str();
+    let client_auth = method.token.client_auth.as_str();
 
     let use_basic = match client_auth {
         "basic" => true,
-        "body" => false,
-        "either" => false,
+        "body" | "either" => false,
         other => return Err(format!("unsupported client_auth: {}", other)),
     };
 
+    let mut params = grant_specific_params;
     if !use_basic {
-        params.push(("client_id".into(), inputs.client_id.into()));
-        if let Some(s) = inputs.client_secret {
+        params.push(("client_id".into(), client_id.into()));
+        if let Some(s) = client_secret {
             params.push(("client_secret".into(), s.into()));
         }
     }
@@ -58,16 +75,16 @@ pub fn exchange(inputs: ExchangeInputs<'_>) -> Result<TokenResponse, String> {
         .build()
         .map_err(|e| format!("failed to build HTTP client: {}", e))?;
 
-    let mut req = client.post(&inputs.method.token.url);
+    let mut req = client.post(&method.token.url);
 
     if use_basic {
-        let secret = inputs.client_secret.unwrap_or("");
-        let encoded = B64_STD.encode(format!("{}:{}", inputs.client_id, secret));
+        let secret = client_secret.unwrap_or("");
+        let encoded = B64_STD.encode(format!("{}:{}", client_id, secret));
         req = req.header("Authorization", format!("Basic {}", encoded));
     }
 
     req = req.header("Accept", "application/json");
-    if let Some(extra) = &inputs.method.token.extra_headers {
+    if let Some(extra) = &method.token.extra_headers {
         for (k, v) in extra {
             req = req.header(k.as_str(), v.as_str());
         }
@@ -99,10 +116,12 @@ pub fn exchange(inputs: ExchangeInputs<'_>) -> Result<TokenResponse, String> {
         ));
     }
 
-    let value: Value = serde_json::from_str(&text)
-        .map_err(|e| format!("token response is not JSON: {} ({})", e, text))?;
+    parse_token_response(&text, &method.token.response_map)
+}
 
-    let rm = &inputs.method.token.response_map;
+fn parse_token_response(text: &str, rm: &ResponseMap) -> Result<TokenResponse, String> {
+    let value: Value = serde_json::from_str(text)
+        .map_err(|e| format!("token response is not JSON: {} ({})", e, text))?;
 
     let access_token = pick_string(&value, &rm.access_token).ok_or_else(|| {
         format!(
