@@ -1,5 +1,20 @@
 # postagent-linux-x64-gnu
 
+## 0.3.2
+
+### Patch Changes
+
+- [#28](https://github.com/actionbook/postagent/pull/28) [`0936f74`](https://github.com/actionbook/postagent/commit/0936f749bc2b8567f82b2cefb00fc6fa0f4503b9) Thanks [@4bmis](https://github.com/4bmis)! - fix(send): auto-refresh expired OAuth tokens once on 401/403.
+
+  On a 401/403 from the upstream, if the request used a `$POSTAGENT.<SITE>.TOKEN` backed by an OAuth credential with a saved refresh_token, `postagent send` now refreshes the access_token once and retries. Static credentials and non-recoverable refresh failures fall back to the existing error path.
+
+- [#24](https://github.com/actionbook/postagent/pull/24) [`5e86187`](https://github.com/actionbook/postagent/commit/5e861873b55d155551bb0a79ea72b65dad644454) Thanks [@4bmis](https://github.com/4bmis)! - feat(send): support `-d @file` and `-d @-` to read the request body from a file or stdin (curl-compatible).
+
+  - `postagent send ... -d @./payload.json` reads the body from `./payload.json` instead of treating `@./payload.json` as a literal string. Previously the only way to send a file's contents was `-d "$(cat payload.json)"`, which was easy to miss and produced confusing API errors (e.g. GitHub returning `400 Problems parsing JSON`) when forgotten.
+  - `postagent send ... -d @-` reads the body from stdin, matching curl's shorthand for piping payloads in.
+  - Resolution happens before `$POSTAGENT.<SITE>.TOKEN` substitution and the token-presence check, so templates inside the file are still resolved and the body's actual contents (not the path) participate in validation.
+  - Inline `-d <value>` continues to work unchanged for values that don't start with `@`.
+
 ## 0.3.1
 
 ### Patch Changes
