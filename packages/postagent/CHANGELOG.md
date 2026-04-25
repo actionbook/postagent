@@ -1,5 +1,11 @@
 # postagent
 
+## 0.3.3
+
+### Patch Changes
+
+- [#29](https://github.com/actionbook/postagent/pull/29) [`1d14401`](https://github.com/actionbook/postagent/commit/1d144016216a2c535679e90818bfc830a932b454) Thanks [@4bmis](https://github.com/4bmis)! - Apply upstream security fixes to bundled TLS dependencies.
+
 ## 0.3.2
 
 ### Patch Changes
