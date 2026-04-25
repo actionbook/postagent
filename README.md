@@ -16,39 +16,15 @@ npm install -g postagent
 
 ## Quickstart
 
-```bash
-# Search related actions
-postagent search "Create a document on Notion"
+Postagent is meant to be driven by an agent, not by you. After installing, just tell your agent it has `postagent` available, then send it a task — for example:
 
-# Get detailed manual for an action
-postagent manual notion pages create_page
+> "Use CLI postagent to list my documents on notion"
 
-# Auth and send request
-postagent auth notion
-postagent send -X POST https://api.notion.com/v1/pages \
-  -H 'Authorization: Bearer $POSTAGENT.NOTION.API_KEY' \
-  -H 'Notion-Version: 2022-06-28' \
-  -H 'Content-Type: application/json' \
-  -d '{"parent":{"page_id":"YOUR_PAGE_ID"},"properties":{"title":[{"text":{"content":"My Page"}}]}}'
-```
-
-The `send` command uses the same options as `curl`, so agents already know how to use it.
-
-Postagent replaces the `API_KEY` placeholder with the actual key/token from local storage, keeping your credentials out of the LLM context entirely.
-
-Add `--dry-run` to preview the resolved request (method, URL, headers, body) without making any outbound call. Sensitive headers are redacted in the preview:
-
-```bash
-postagent send https://api.github.com/user \
-  -H 'Authorization: Bearer $POSTAGENT.GITHUB.TOKEN' \
-  --dry-run
-```
-
-## Usage with Agents
-
-The easiest way is to just tell your agent to use it:
+The agent will discover, read, auth, and call the API on its own:
 
 ![Postagent demo](./assets/demo.png)
+
+`send` mirrors `curl`, so agents already know how to drive it. The `$POSTAGENT.NOTION.API_KEY` placeholder is resolved from local storage at send time — your credentials never enter the model context. Add `--dry-run` to any `send` to let the agent preview the resolved request (with sensitive headers redacted) before firing.
 
 ## Configuration
 
