@@ -1,10 +1,10 @@
 # Publish: build + npm release executor. Triggered by a vX.Y.Z tag, or
 # dispatched by release.yml after it tags a version.
 #
-# Matrix-builds postagent-core for the four supported targets (darwin
-# arm64/x64, linux x64/arm64-gnu), drops each binary into its platform
-# package, builds the postagent JS bundle, and publishes all five packages
-# to npm. Does not touch version numbers — that is release.yml's job.
+# Matrix-builds postagent-core for all supported targets (darwin
+# arm64/x64, linux x64/arm64-gnu, windows x64), drops each binary into its
+# platform package, builds the postagent JS bundle, and publishes all
+# packages to npm. Does not touch version numbers — that is release.yml's job.
 
 name: Publish
 
@@ -39,6 +39,10 @@ jobs:
             runner: ubuntu-latest
             package: postagent-linux-arm64-gnu
             binary: postagent-core
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+            package: postagent-win32-x64
+            binary: postagent-core.exe
 
     runs-on: ${{ matrix.runner }}
 
@@ -92,6 +96,7 @@ jobs:
           for pkg in postagent-darwin-arm64 postagent-darwin-x64 postagent-linux-x64-gnu postagent-linux-arm64-gnu; do
             cp artifacts/$pkg/* packages/$pkg/bin/
           done
+          cp artifacts/postagent-win32-x64/* packages/postagent-win32-x64/bin/
           chmod +x packages/postagent-darwin-*/bin/postagent-core
           chmod +x packages/postagent-linux-*/bin/postagent-core
 
@@ -103,7 +108,7 @@ jobs:
 
       - name: Publish platform packages
         run: |
-          for pkg in postagent-darwin-arm64 postagent-darwin-x64 postagent-linux-x64-gnu postagent-linux-arm64-gnu; do
+          for pkg in postagent-darwin-arm64 postagent-darwin-x64 postagent-linux-x64-gnu postagent-linux-arm64-gnu postagent-win32-x64; do
             pnpm --filter $pkg publish --no-git-checks --access public
           done
         env:

@@ -10,8 +10,29 @@ No more installing a new MCP server or CLI for each app your agent uses. Postage
 
 ## Install
 
+Supports macOS (ARM64/x64), Linux (x64/ARM64), and Windows (x64).
+
 ```bash
 npm install -g postagent
+```
+
+### Build from source (Windows)
+
+On Windows, if the prebuilt binary is unavailable, you can compile from source:
+
+```bash
+# 1. Install Rust: https://rustup.rs
+# 2. Clone and build the native binary
+git clone https://github.com/actionbook/postagent.git
+cd postagent
+cargo build --release --manifest-path packages/postagent-core/Cargo.toml
+
+# 3. Place the binary where the CLI expects it
+mkdir -p packages/postagent-win32-x64/bin
+copy packages\postagent-core\target\release\postagent-core.exe packages\postagent-win32-x64\bin\
+
+# 4. Link for development
+npm install -g .
 ```
 
 ## Quickstart
